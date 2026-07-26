@@ -1,5 +1,5 @@
 {
-  "name": "@pooriaarab/vibedating",
+  "name": "vibedate-cli",
   "version": "0.1.0",
   "description": "Dating by tokens — matched by usage league across agentic CLIs. Raw usage stays local; only your league is shared. CLI + local web app + MCP. Local-first.",
   "type": "module",
