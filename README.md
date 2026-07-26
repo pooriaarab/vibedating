@@ -24,13 +24,13 @@ Part of the **Vibe Suite** — companion tools for agentic coding CLIs. Ships as
 ## Install
 
 ```bash
-npm install -g @pooriaarab/vibedating
+npm install -g vibedate-cli
 ```
 
 …or run it ad-hoc:
 
 ```bash
-npx @pooriaarab/vibedating connect
+npx vibedate-cli connect
 ```
 
 ## Quick start
@@ -77,7 +77,7 @@ The same local engine drives all three, so you can use it wherever you work:
 ### As a library
 
 ```ts
-import { league, matches, readUsage, CANDIDATES } from '@pooriaarab/vibedating';
+import { league, matches, readUsage, CANDIDATES } from 'vibedate-cli';
 
 const usage = await readUsage('claude-code');     // { totalTokens, verified, ... }
 const lg = league(usage.totalTokens);             // { name: '10M', min: 10_000_000 }
