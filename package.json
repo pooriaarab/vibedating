@@ -1,0 +1,35 @@
+{
+  "name": "@pooriaarab/vibedating",
+  "version": "0.1.0",
+  "description": "Dating by tokens — matched by usage league across agentic CLIs. Raw usage stays local; only your league is shared. CLI + local web app + MCP. Local-first.",
+  "type": "module",
+  "license": "MIT",
+  "author": "Pooria Arab",
+  "bin": { "vibedating": "./dist/cli.js" },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": { ".": { "types": "./dist/index.d.ts", "import": "./dist/index.js" } },
+  "files": ["dist"],
+  "scripts": {
+    "build": "tsup src/index.ts src/cli.ts src/mcp.ts --format esm --dts --clean",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "dependencies": {
+    "@pooriaarab/vibe-core": "^0.1.0",
+    "@modelcontextprotocol/sdk": "^1.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.0",
+    "tsup": "^8.0.0",
+    "typescript": "^5.4.0",
+    "vitest": "^1.6.0"
+  },
+  "homepage": "https://github.com/pooriaarab/vibedating#readme",
+  "repository": { "type": "git", "url": "git+https://github.com/pooriaarab/vibedating.git" },
+  "bugs": { "url": "https://github.com/pooriaarab/vibedating/issues" },
+  "keywords": ["vibe-suite", "vibedating", "claude-code", "codex", "agentic", "cli", "mcp", "tokens", "local-first"],
+  "publishConfig": { "access": "public" },
+  "engines": { "node": ">=18" }
+}
