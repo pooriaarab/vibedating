@@ -168,7 +168,7 @@ const entryUrl = process.argv[1];
 if (entryUrl !== undefined) {
   let isMain = false;
   try {
-    isMain = import.meta.url === pathToFileURL(entryUrl).href;
+    isMain = true;
   } catch {
     isMain = false;
   }
