@@ -5,15 +5,27 @@
  *   GET  /             -> the dating UI (see ./web-app-html.ts)
  *   GET  /api/state    -> { connected, ...profile, candidates: matches }
  *   POST /api/connect  -> read usage, compute + store league, return new state
+ *   POST /api/match    -> confirm a same-league match with a candidate; on
+ *                         confirmation fires ONE best-effort vibenotify event
  *
  * Raw token usage appears in /api/state so the local page can show it behind an
  * opt-in toggle. It is never sent anywhere off-machine (there is no off-machine).
+ *
+ * The match notification lives in this endpoint — NOT in the pure `matches()`
+ * filter, which runs on every state read and would re-fire constantly. The sink
+ * is injectable (`StartServerOptions.notify`) so tests can capture events; it
+ * defaults to vibe-core's `notify` (~/.vibe/notify.jsonl).
  */
 import http, { type IncomingMessage, type Server, type ServerResponse } from 'node:http';
+import { makeEvent, notify as vibeCoreNotify } from '@pooriaarab/vibe-core';
+import type { VibeEvent } from '@pooriaarab/vibe-core';
 import type { Candidate } from './index.js';
 import { CANDIDATES, matches, readUsage } from './index.js';
 import { connectProfile, loadProfile, type ProfileState } from './state.js';
 import { webAppHtml } from './web-app-html.js';
+
+/** Sink for milestone notifications. Injectable so tests can capture events. */
+export type NotifySink = (event: VibeEvent) => void;
 
 /** Shape served to the page. `totalTokens` is local-only by contract. */
 export interface ServerState {
@@ -36,6 +48,8 @@ export interface StartServerOptions {
   readonly handle?: string;
   /** Override the state directory (tests). Defaults to ~/.vibedating. */
   readonly dir?: string;
+  /** Override the notification sink (tests). Defaults to vibe-core's `notify`. */
+  readonly notify?: NotifySink;
 }
 
 export interface StartedServer {
@@ -141,6 +155,53 @@ async function handle(
     const snapshot = await readUsage(harness);
     const profile = connectProfile(snapshot, handle, opts.dir);
     sendJson(res, 200, profileToState(profile));
+    return;
+  }
+
+  if (req.method === 'POST' && pathname === '/api/match') {
+    const body = await readBody(req);
+    let parsed: Record<string, unknown> = {};
+    if (body.trim() !== '') {
+      try {
+        parsed = JSON.parse(body) as Record<string, unknown>;
+      } catch {
+        sendJson(res, 400, { error: 'invalid JSON body' });
+        return;
+      }
+    }
+    const candidateHandle = typeof parsed['handle'] === 'string' ? parsed['handle'] : '';
+    if (candidateHandle === '') {
+      sendJson(res, 400, { error: 'missing candidate handle' });
+      return;
+    }
+    const profile = loadProfile(opts.dir);
+    if (!profile) {
+      sendJson(res, 409, { error: 'not connected' });
+      return;
+    }
+    const candidate = CANDIDATES.find((c) => c.handle === candidateHandle);
+    if (!candidate) {
+      sendJson(res, 404, { error: 'unknown candidate' });
+      return;
+    }
+    // A match is confirmed only within the SAME league — stricter than the
+    // pure matches() filter, which also surfaces adjacent leagues.
+    const matched = candidate.league === profile.league;
+    if (matched) {
+      const sink: NotifySink = opts.notify ?? vibeCoreNotify;
+      try {
+        sink(
+          makeEvent('match', profile.harness, process.cwd(), {
+            summary: `matched with ${candidate.handle} - SAME LEAGUE`,
+            handle: candidate.handle,
+            league: profile.league,
+          }),
+        );
+      } catch {
+        /* best effort — a notification failure must never break matching */
+      }
+    }
+    sendJson(res, 200, { matched, handle: candidate.handle, league: candidate.league });
     return;
   }
 
