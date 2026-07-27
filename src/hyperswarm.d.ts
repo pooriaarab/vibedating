@@ -40,6 +40,10 @@ declare module 'hyperswarm' {
   class Hyperswarm {
     constructor(opts?: Hyperswarm.Options);
     readonly keyPair: { readonly publicKey: Buffer; readonly secretKey: Buffer };
+    readonly dht: {
+      /** Resolves once the node has queried its bootstrap nodes and has routes. */
+      fullyBootstrapped(): Promise<unknown>;
+    };
     join(topic: Buffer, opts?: { server?: boolean; client?: boolean }): Hyperswarm.DiscoverySession;
     leave(topic: Buffer): Promise<void>;
     destroy(opts?: { force?: boolean }): Promise<void>;

@@ -3,7 +3,11 @@
  * in-process DHT (hyperdht's createTestnet — the public DHT is never touched).
  * They discover each other via a shared random topic, run the handshake both
  * ways, and each must end up with the other's { handle, league } in its peer
+<<<<<<< HEAD
  * set (and in its peers.json). A mismatch-league impostor must be dropped.
+=======
+ * set (and in its peers.json). A mismatched-league impostor must be dropped.
+>>>>>>> origin/p2p-matching
  */
 import { mkdtempSync, rmSync } from 'node:fs';
 import os from 'node:os';
@@ -113,6 +117,8 @@ describe('live P2P discovery (in-process DHT, no public network)', () => {
     // a hostile hello — wrong league plus raw-usage fields — on every connection.
     const { default: Hyperswarm } = await import('hyperswarm');
     const mallory = new Hyperswarm({ bootstrap: testnet.bootstrap });
+    // Same rule as startDiscovery: no announce/lookup before the node has routes.
+    await mallory.dht.fullyBootstrapped();
     let aliceHelloSeen = '';
     mallory.on('connection', (socket) => {
       socket.write(
@@ -132,8 +138,8 @@ describe('live P2P discovery (in-process DHT, no public network)', () => {
     const discovery = mallory.join(topic, { server: true, client: true });
     // A raw swarm re-refreshes a topic only every ~10 minutes, and its first
     // round can legitimately miss/error under load — re-run rounds eagerly so
-    // this test isn't hostage to one racy lookup. (startDiscovery nodes await
-    // their first round, so they don't need this.)
+    // this test isn't hostage to one racy lookup. (startDiscovery sessions do
+    // this internally; mallory is a bare Hyperswarm, so it happens here.)
     const retry = setInterval(() => {
       void discovery.refresh({ server: true, client: true }).catch(() => {});
     }, 1000);
