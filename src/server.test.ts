@@ -4,7 +4,14 @@ import os from 'node:os';
 import path from 'node:path';
 import type { VibeEvent } from '@pooriaarab/vibe-core';
 import { CANDIDATES } from './index.js';
-import { startServer, type StartedServer, type StartServerOptions } from './server.js';
+import type { RtcFrame } from './frame.js';
+import {
+  startServer,
+  type LiveBridge,
+  type LivePeerInfo,
+  type StartedServer,
+  type StartServerOptions,
+} from './server.js';
 
 // Hermetic state dir so the test never touches ~/.vibedating.
 const tmpDir = mkdtempSync(path.join(os.tmpdir(), 'vibedating-test-'));
@@ -171,5 +178,172 @@ describe('POST /api/match', () => {
       await new Promise<void>((resolve) => s.server.close(() => resolve()));
       rmSync(fresh, { recursive: true, force: true });
     }
+  });
+});
+
+describe('live A/V signaling bridge (/api/live/peers, /live/signal)', () => {
+  /** A fake LiveBridge that records what the server tries to send and lets a
+   *  test pre-queue frames for the long-poll to return. */
+  function fakeBridge(seedPeers: readonly LivePeerInfo[] = []): LiveBridge & {
+    sent: Array<{ handle: string; frame: RtcFrame }>;
+    queue: Map<string, RtcFrame[]>;
+  } {
+    const sent: Array<{ handle: string; frame: RtcFrame }> = [];
+    const queue = new Map<string, RtcFrame[]>();
+    const peers: LivePeerInfo[] = [...seedPeers];
+    return {
+      peers,
+      addLink() {
+        /* not exercised here */
+      },
+      sendSignal(handle, frame) {
+        sent.push({ handle, frame });
+      },
+      async pollSignal(_handle) {
+        const q = queue.get(_handle) ?? [];
+        if (q.length > 0) return q.shift() ?? null;
+        return null; // never block in tests
+      },
+      sent,
+      queue,
+    };
+  }
+
+  function postSignal(url: string, body: unknown): Promise<Response> {
+    return fetch(`${url}/live/signal`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+  }
+
+  it('GET /api/live/peers is an empty array when no bridge is attached', async () => {
+    await withServer(async ({ url }) => {
+      const res = await fetch(`${url}/api/live/peers`);
+      expect(res.status).toBe(200);
+      const json = (await res.json()) as { peers: unknown[] };
+      expect(json.peers).toEqual([]);
+    });
+  });
+
+  it('GET /api/live/peers reflects the bridge peer snapshot', async () => {
+    const bridge = fakeBridge([
+      { handle: '@alice', league: '10M', harness: 'codex' },
+    ]);
+    await withServer(
+      async ({ url }) => {
+        const res = await fetch(`${url}/api/live/peers`);
+        expect(res.status).toBe(200);
+        const json = (await res.json()) as { peers: LivePeerInfo[] };
+        expect(json.peers).toEqual([
+          { handle: '@alice', league: '10M', harness: 'codex' },
+        ]);
+      },
+      { live: bridge },
+    );
+  });
+
+  it('POST /live/signal relays a valid rtc-offer to the bridge', async () => {
+    const bridge = fakeBridge();
+    await withServer(
+      async ({ url }) => {
+        const res = await postSignal(url, {
+          handle: '@alice',
+          frame: { t: 'rtc-offer', sdp: 'v=0\r\n' },
+        });
+        expect(res.status).toBe(200);
+        expect((await res.json()) as { ok: boolean }).toStrictEqual({ ok: true });
+        expect(bridge.sent).toEqual([
+          { handle: '@alice', frame: { t: 'rtc-offer', sdp: 'v=0\r\n' } },
+        ]);
+      },
+      { live: bridge },
+    );
+  });
+
+  it('POST /live/signal STRIPS extra keys the browser tries to attach (allowlist)', async () => {
+    const bridge = fakeBridge();
+    await withServer(
+      async ({ url }) => {
+        const res = await postSignal(url, {
+          handle: '@alice',
+          frame: {
+            t: 'rtc-offer',
+            sdp: 'v=0\r\n',
+            leak: 'raw-usage',
+            impersonator: true,
+          },
+        });
+        expect(res.status).toBe(200);
+        // The frame that reached the bridge must be the allowlisted shape ONLY.
+        expect(bridge.sent).toHaveLength(1);
+        expect(bridge.sent[0]!.frame).toEqual({ t: 'rtc-offer', sdp: 'v=0\r\n' });
+      },
+      { live: bridge },
+    );
+  });
+
+  it('POST /live/signal 400s on a malformed / oversized frame and does NOT relay', async () => {
+    const bridge = fakeBridge();
+    await withServer(
+      async ({ url }) => {
+        // missing sdp
+        const r1 = await postSignal(url, { handle: '@a', frame: { t: 'rtc-offer' } });
+        expect(r1.status).toBe(400);
+        // oversized candidate (> 4 KiB)
+        const r2 = await postSignal(url, {
+          handle: '@a',
+          frame: { t: 'rtc-ice', candidate: 'x'.repeat(5000) },
+        });
+        expect(r2.status).toBe(400);
+        // a non-rtc frame type must be rejected too
+        const r3 = await postSignal(url, {
+          handle: '@a',
+          frame: { t: 'msg', id: '1', text: 'hi', at: 1 },
+        });
+        expect(r3.status).toBe(400);
+        // nothing leaked through to the bridge
+        expect(bridge.sent).toEqual([]);
+      },
+      { live: bridge },
+    );
+  });
+
+  it('POST /live/signal 400s when no bridge is attached', async () => {
+    await withServer(async ({ url }) => {
+      const res = await postSignal(url, { handle: '@a', frame: { t: 'rtc-offer', sdp: 'v=0' } });
+      expect(res.status).toBe(400);
+      const json = (await res.json()) as { error: string };
+      expect(json.error).toBe('live-not-attached');
+    });
+  });
+
+  it('GET /live/signal long-poll returns a queued frame, then null when empty', async () => {
+    const bridge = fakeBridge();
+    bridge.queue.set('@alice', [{ t: 'rtc-answer', sdp: 'v=0\r\n' }]);
+    await withServer(
+      async ({ url }) => {
+        const r1 = await fetch(`${url}/live/signal?handle=${encodeURIComponent('@alice')}`);
+        expect(r1.status).toBe(200);
+        expect((await r1.json()) as { frame: RtcFrame | null }).toStrictEqual({
+          frame: { t: 'rtc-answer', sdp: 'v=0\r\n' },
+        });
+        // queue drained → next poll returns null immediately
+        const r2 = await fetch(`${url}/live/signal?handle=${encodeURIComponent('@alice')}`);
+        expect((await r2.json()) as { frame: RtcFrame | null }).toStrictEqual({ frame: null });
+      },
+      { live: bridge },
+    );
+  });
+
+  it('GET /live/signal 400s on a missing handle', async () => {
+    const bridge = fakeBridge();
+    await withServer(
+      async ({ url }) => {
+        const res = await fetch(`${url}/live/signal`);
+        expect(res.status).toBe(400);
+      },
+      { live: bridge },
+    );
   });
 });

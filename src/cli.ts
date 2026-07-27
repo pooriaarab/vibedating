@@ -16,10 +16,10 @@ import readline from 'node:readline';
 import { pathToFileURL } from 'node:url';
 import process from 'node:process';
 import { CANDIDATES, league, leagueIndex, matches, readUsage, type Harness } from './index.js';
-import { LIVE_NOTICE, loadPeers, startDiscovery, TOPIC_PREFIX, type PeerHello } from './p2p.js';
+import { LIVE_NOTICE, loadPeers, startDiscovery, TOPIC_PREFIX, type DiscoverySession, type PeerHello } from './p2p.js';
 import { createPairing } from './pairing.js';
 import { canShareLive, connectProfile, grantLiveConsent, loadProfile } from './state.js';
-import { startServer } from './server.js';
+import { createLiveBridge, startServer, type LiveBridge } from './server.js';
 import { runMcp } from './mcp.js';
 
 /** Mirrors package.json version (kept here; package.json imports are brittle under bundling). */
@@ -230,10 +230,42 @@ async function cmdDiscover(live: boolean): Promise<number> {
 }
 
 async function cmdOpen(port: number | undefined): Promise<number> {
-  const { url } = await startServer({ port });
-  process.stdout.write(`\n  vibedating local web app → ${url}\n\n`);
+  // Attach a live-signaling bridge IF the user has connected a profile, so the
+  // web app's Video button can reach real same-league peers. `open` is treated
+  // as the live opt-in exactly like `live` / `discover --live` (the command
+  // invocation grants consent). Without a profile the web app still serves the
+  // local dating demo — video just has nobody to call yet.
+  const profile = loadProfile();
+  let live: LiveBridge | undefined;
+  let session: DiscoverySession | undefined;
+  if (profile) {
+    if (!canShareLive()) grantLiveConsent();
+    live = createLiveBridge();
+    const hello: PeerHello = {
+      handle: profile.handle,
+      league: profile.league,
+      harness: profile.harness,
+    };
+    process.stdout.write(`\n  ${LIVE_NOTICE}\n`);
+    session = await startDiscovery({ hello, onLink: (link) => live!.addLink(link) });
+  }
+  const started = await startServer({ port, live });
+  process.stdout.write(`\n  vibedating local web app → ${started.url}\n`);
+  if (live) {
+    process.stdout.write('  • live A/V (video) available for connected same-league peers\n');
+  } else {
+    process.stdout.write('  • connect first (`vibedating connect`) to enable live video\n');
+  }
   process.stdout.write('  • raw usage stays local · only league shared\n');
   process.stdout.write('  (Ctrl+C to stop)\n\n');
+  // Run until interrupted, then leave the swarm + close the server cleanly.
+  await new Promise<void>((resolve) => {
+    process.once('SIGINT', () => resolve());
+    process.once('SIGTERM', () => resolve());
+  });
+  process.stdout.write('\n  shutting down…\n');
+  if (session) await session.close();
+  await new Promise<void>((resolve) => started.server.close(() => resolve()));
   return 0;
 }
 
@@ -292,7 +324,8 @@ async function cmdLive(dating: boolean): Promise<number> {
   process.stdout.write(
     `  topic: ${TOPIC_PREFIX}${profile.league} → ${session.topic.toString('hex').slice(0, 12)}…\n`,
   );
-  process.stdout.write('  type to chat · /next · /open <handle> · /quit\n\n');
+  process.stdout.write('  type to chat · /next · /open <handle> · /quit\n');
+  process.stdout.write('  video chat: live A/V runs in the web app — run `vibedating open`\n\n');
 
   // Read stdin line by line; slash-commands drive the pairing policy.
   const rl = readline.createInterface({ input: process.stdin, terminal: false });
@@ -343,6 +376,7 @@ Usage:
   vibedating discover [--live]  Find live same-league peers over the DHT (opt-in)
   vibedating live [--dating]    Live chat with same-league peers (omegle /next, or --dating pick)
   vibedating open [--port N]    Serve the local web app (default: random port)
+                                + live A/V video with connected same-league peers
   vibedating mcp                Run the stdio MCP server (profile, matches)
   vibedating --version
   vibedating --help
