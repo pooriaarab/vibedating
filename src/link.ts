@@ -10,6 +10,8 @@
  *
  * Everything on the wire goes through {@link parseFrame}'s allowlist, so a peer
  * can never smuggle extra fields onto a `msg` (and thus never a raw-usage field).
+ * The same allowlist guards every `media-*` frame, so the file-transfer path
+ * inherits the exact same invariant.
  *
  * The hello handshake has already happened by the time a link exists —
  * `hello` is the validated peer identity, captured at construction. The
@@ -18,15 +20,33 @@
  */
 import { randomUUID } from 'node:crypto';
 import type { Duplex } from 'node:stream';
-import { parseFrame, serializeFrame, type Frame } from './frame.js';
+import { parseFrame, serializeFrame, type Frame, type MediaFrame } from './frame.js';
+import {
+  MediaReceiver,
+  type ReceivedMedia,
+  sendMediaFile,
+} from './media.js';
+
+/** Options for {@link createPeerLink}. */
+export interface CreatePeerLinkOptions {
+  /** Directory to write reassembled media files into (defaults to os.tmpdir()). */
+  readonly mediaTmpDir?: string;
+}
 
 export interface PeerLink {
   /** The validated identity of the remote peer (from the hello handshake). */
   readonly hello: { handle: string; league: string; harness: string };
   /** Send a line of text as a `msg` frame. */
   send(text: string): void;
+  /** Read a file from disk and send it as a chunked media transfer. */
+  sendMedia(
+    filePath: string,
+    opts?: { mime?: string; name?: string },
+  ): Promise<{ id: string; size: number }>;
   /** Register a callback for each incoming `msg` frame. */
   onMessage(cb: (m: { id: string; text: string; at: number }) => void): void;
+  /** Register a callback fired for each fully-reassembled incoming media file. */
+  onMedia(cb: (m: ReceivedMedia) => void): void;
   /** Register a callback fired once when the peer closes the link. */
   onClose(cb: () => void): void;
   /** Omegle "next": write a `bye` frame, then end the socket. */
@@ -42,17 +62,41 @@ export function createPeerLink(
   socket: Duplex,
   hello: { handle: string; league: string; harness: string },
   initialBuffer = '',
+  linkOpts: CreatePeerLinkOptions = {},
 ): PeerLink {
   const messageCbs = new Set<(m: { id: string; text: string; at: number }) => void>();
+  const mediaCbs = new Set<(m: ReceivedMedia) => void>();
   const closeCbs = new Set<() => void>();
   let buf = initialBuffer;
   let closed = false;
+
+  // Lazily created on the first onMedia() registration so a link that nobody
+  // listens for media on never touches the disk (media frames are then just
+  // dropped, like 'typing').
+  let mediaReceiver: MediaReceiver | undefined;
+  const ensureMediaReceiver = (): MediaReceiver => {
+    if (!mediaReceiver) {
+      mediaReceiver = new MediaReceiver(
+        (m) => {
+          for (const cb of mediaCbs) cb(m);
+        },
+        { tmpDir: linkOpts.mediaTmpDir },
+      );
+    }
+    return mediaReceiver;
+  };
 
   const dispatch = (frame: Frame): void => {
     switch (frame.t) {
       case 'msg': {
         const m = { id: frame.id, text: frame.text, at: frame.at };
         for (const cb of messageCbs) cb(m);
+        break;
+      }
+      case 'media-start':
+      case 'media-chunk':
+      case 'media-end': {
+        mediaReceiver?.handle(frame as MediaFrame);
         break;
       }
       case 'bye': {
@@ -115,8 +159,16 @@ export function createPeerLink(
       const frame: Frame = { t: 'msg', id: randomUUID(), text, at: Date.now() };
       socket.write(serializeFrame(frame) + '\n');
     },
+    async sendMedia(filePath, opts = {}) {
+      if (closed) return { id: '', size: 0 };
+      return sendMediaFile({ socket, path: filePath, mime: opts.mime, name: opts.name });
+    },
     onMessage(cb) {
       messageCbs.add(cb);
+    },
+    onMedia(cb) {
+      ensureMediaReceiver();
+      mediaCbs.add(cb);
     },
     onClose(cb) {
       closeCbs.add(cb);
