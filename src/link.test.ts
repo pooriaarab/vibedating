@@ -126,4 +126,44 @@ describe('PeerLink', () => {
     expect(sink1).toHaveBeenCalledTimes(1);
     expect(sink2).toHaveBeenCalledTimes(1);
   });
+
+  it('delivers a sent rtc signal frame to the remote onSignal (allowlisted)', async () => {
+    const { a, b } = crossWire();
+    const linkA = createPeerLink(a, helloA);
+    const linkB = createPeerLink(b, helloB);
+    const onSignal = vi.fn();
+    linkB.onSignal(onSignal);
+
+    // A smears extra keys + a leak onto its offer; parseFrame on B's side must
+    // strip them before onSignal ever fires.
+    a.write(
+      JSON.stringify({ t: 'rtc-offer', sdp: 'v=0\r\n', leak: 'raw-usage', impersonator: true }) +
+        '\n',
+    );
+    await tick();
+
+    expect(onSignal).toHaveBeenCalledTimes(1);
+    expect(onSignal.mock.calls[0]![0]).toEqual({ t: 'rtc-offer', sdp: 'v=0\r\n' });
+  });
+
+  it('relays rtc-offer / rtc-answer / rtc-ice both ways over one pair', async () => {
+    const { a, b } = crossWire();
+    const linkA = createPeerLink(a, helloA);
+    const linkB = createPeerLink(b, helloB);
+    const gotA = vi.fn();
+    const gotB = vi.fn();
+    linkA.onSignal(gotA);
+    linkB.onSignal(gotB);
+
+    linkA.sendSignal({ t: 'rtc-offer', sdp: 'OFFER' });
+    linkB.sendSignal({ t: 'rtc-answer', sdp: 'ANSWER' });
+    linkA.sendSignal({ t: 'rtc-ice', candidate: 'c1' });
+    linkB.sendSignal({ t: 'rtc-ice', candidate: '' }); // end-of-gathering marker
+    await tick();
+
+    expect(gotB.mock.calls[0]![0]).toEqual({ t: 'rtc-offer', sdp: 'OFFER' });
+    expect(gotB.mock.calls[1]![0]).toEqual({ t: 'rtc-ice', candidate: 'c1' });
+    expect(gotA.mock.calls[0]![0]).toEqual({ t: 'rtc-answer', sdp: 'ANSWER' });
+    expect(gotA.mock.calls[1]![0]).toEqual({ t: 'rtc-ice', candidate: '' });
+  });
 });
