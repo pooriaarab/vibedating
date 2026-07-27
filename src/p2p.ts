@@ -20,6 +20,8 @@ import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import type { Harness, VibeEvent } from '@pooriaarab/vibe-core';
 import { makeEvent, notify as vibeCoreNotify } from '@pooriaarab/vibe-core';
+import { parseFrame, serializeFrame } from './frame.js';
+import { createPeerLink, type PeerLink } from './link.js';
 import { defaultStateDir } from './state.js';
 
 /* -------------------------------------------------------------------------- */
@@ -188,6 +190,13 @@ export interface DiscoveryOptions {
   readonly stateDir?: string;
   /** Called after each accepted handshake; `isNew` = first time this handle is seen. */
   readonly onPeer?: (peer: PeerHello, isNew: boolean) => void;
+  /**
+   * Called once per connection with a live {@link PeerLink} over the same socket
+   * (the hello was frame #1; subsequent frames flow to the link). Omit for the
+   * plain `discover` behavior (no live chat). Existing discovery behavior is
+   * unchanged when this is absent.
+   */
+  readonly onLink?: (link: PeerLink) => void;
   /** Match-notification sink (tests capture with a fake). Best-effort. */
   readonly notify?: NotifySink;
 }
@@ -211,7 +220,7 @@ export interface DiscoverySession {
  * `share:live` grant (or an explicit `--live` opt-in in the same breath).
  */
 export async function startDiscovery(opts: DiscoveryOptions): Promise<DiscoverySession> {
-  const { hello, stateDir = defaultStateDir(), onPeer, notify = vibeCoreNotify } = opts;
+  const { hello, stateDir = defaultStateDir(), onPeer, onLink, notify = vibeCoreNotify } = opts;
   const topic = opts.topic ?? leagueTopic(hello.league);
 
   // Imported lazily so non-live commands (`matches`, `mcp`, `--help`) never pay
@@ -229,19 +238,38 @@ export async function startDiscovery(opts: DiscoveryOptions): Promise<DiscoveryS
   swarm.on('connection', (socket, info) => {
     const remoteKey = info.publicKey.toString('hex');
 
-    // Both sides write their hello immediately, then read the peer's line.
-    socket.write(serializeHandshake(hello) + '\n');
+    // Send our hello as the FIRST frame on the connection. The live protocol
+    // unifies the old ad-hoc handshake line into a typed frame so the whole
+    // stream (hello + chat) shares one newline-JSON frame channel. The payload
+    // is still ONLY { handle, league, harness } — raw usage is never on it.
+    socket.write(
+      serializeFrame({ t: 'hello', handle: hello.handle, league: hello.league, harness: hello.harness }) +
+        '\n',
+    );
 
+    // The hello handshake: buffer until the first line, parse it as a frame,
+    // enforce the league allowlist + the parseFrame field allowlist, then hand
+    // the socket to a PeerLink for all subsequent frames.
     let buf = '';
-    socket.on('data', (chunk: Buffer) => {
+    let handedOff = false;
+    const onData = (chunk: Buffer): void => {
+      if (handedOff) return; // PeerLink owns the socket now
       buf += chunk.toString('utf8');
       let nl: number;
       while ((nl = buf.indexOf('\n')) >= 0) {
         const line = buf.slice(0, nl);
         buf = buf.slice(nl + 1);
         if (line.trim() === '') continue;
-        const peer = parseHandshake(line);
-        if (peer === null) continue;
+        const frame = parseFrame(line);
+        if (frame === null) continue; // malformed/unknown — drop, never crash
+        if (frame.t !== 'hello') continue; // frame #1 must be the hello
+        // Build the PeerHello from the allowlisted fields only — anything else
+        // a peer stuffed onto the frame was dropped by parseFrame.
+        const peer: PeerHello = {
+          handle: frame.handle,
+          league: frame.league,
+          harness: frame.harness,
+        };
         // The topic already restricts us to one league; a peer claiming a
         // different league on it is bogus — drop it.
         if (peer.league !== hello.league) continue;
@@ -263,8 +291,22 @@ export async function startDiscovery(opts: DiscoveryOptions): Promise<DiscoveryS
           }
         }
         onPeer?.(peer, isNew);
+
+        // Hello consumed — frame #1 done. Hand the socket (and any leftover
+        // bytes after the hello line) to a PeerLink so subsequent msg/typing/bye
+        // frames flow to the caller's onLink. Discovery behavior above is
+        // identical whether or not a link is requested.
+        handedOff = true;
+        socket.off('data', onData);
+        if (onLink !== undefined) {
+          const link = createPeerLink(socket, peer, buf);
+          onLink(link);
+        }
+        buf = '';
+        return;
       }
-    });
+    };
+    socket.on('data', onData);
     socket.on('error', () => {
       /* peer vanished mid-handshake — fine, the swarm retries */
     });
