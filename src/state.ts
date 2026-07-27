@@ -19,6 +19,14 @@ import { league } from './index.js';
 /** Consent scope covering "share my league bucket". Raw usage is never in scope. */
 export const CONSENT_SCOPE = 'share:league';
 
+/**
+ * Consent scope covering live P2P discovery: joining the public DHT on your
+ * league topic and exchanging { handle, league, harness } with same-league
+ * peers. Raw usage is never in scope. Opt-in only (default OFF) — granted by
+ * `vibedating discover --live`, never implicitly.
+ */
+export const LIVE_CONSENT_SCOPE = 'share:live';
+
 /** The persisted profile. `totalTokens` is LOCAL ONLY. */
 export interface ProfileState {
   readonly handle: string;
@@ -106,9 +114,23 @@ export function canShareLeague(dir: string = defaultStateDir()): boolean {
   return createLedger(dir).allows(CONSENT_SCOPE);
 }
 
-/** Forget the profile and revoke share consent. Safe to call when never connected. */
+/** Grant (idempotently) consent for live P2P discovery — the explicit opt-in. */
+export function grantLiveConsent(dir: string = defaultStateDir()): void {
+  createLedger(dir).grant(
+    LIVE_CONSENT_SCOPE,
+    'discover --live: share handle+league+harness (never raw usage) with same-league peers on the public DHT',
+  );
+}
+
+/** Whether the user has opted in to live P2P discovery. Default OFF. */
+export function canShareLive(dir: string = defaultStateDir()): boolean {
+  return createLedger(dir).allows(LIVE_CONSENT_SCOPE);
+}
+
+/** Forget the profile and revoke share consent (league + live). Safe to call when never connected. */
 export function resetProfile(dir: string = defaultStateDir()): void {
   createLedger(dir).revoke(CONSENT_SCOPE);
+  createLedger(dir).revoke(LIVE_CONSENT_SCOPE);
   try {
     rmSync(profilePath(dir), { force: true });
   } catch {
