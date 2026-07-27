@@ -11,9 +11,27 @@ export const MAX_MEDIA_SIZE = 25 * 1024 * 1024; // 25 MiB
 export const MAX_MIME_LEN = 128;
 /** Largest `media-start.name` string accepted. */
 export const MAX_NAME_LEN = 256;
-/** Per-line cap sized to admit the largest legal frame (a max `media-chunk`
- *  is ~MAX_B64_CHUNK_LEN bytes of b64 plus the JSON wrapper). */
-const MAX_FRAME_LEN = MAX_B64_CHUNK_LEN + 1024;
+/** Largest `sdp` string accepted on an `rtc-offer` / `rtc-answer` frame.
+ *  Browser SDP blobs are typically 1-4 KiB; 64 KiB is a generous ceiling that
+ *  still keeps a single signaling line cheap to buffer and parse. */
+export const MAX_SDP_LEN = 64 * 1024; // 64 KiB
+/** Largest `candidate` string accepted on an `rtc-ice` frame. ICE candidate
+ *  lines are tiny (<1 KiB); 4 KiB is a generous ceiling. */
+export const MAX_CANDIDATE_LEN = 4 * 1024; // 4 KiB
+/**
+ * Per-line cap sized to admit the LARGEST legal frame AFTER JSON escaping:
+ *  - a max `rtc-offer` / `rtc-answer` carries a MAX_SDP_LEN-char sdp, which
+ *    JSON.stringify can AT MOST double (every char escaped, e.g. CR/LF → \r\n),
+ *    so its worst-case wire form is ~2*MAX_SDP_LEN bytes plus the wrapper;
+ *  - a max `media-chunk` is ~MAX_B64_CHUNK_LEN chars of base64 (no escaping —
+ *    base64 contains no quotes / backslashes / control bytes).
+ * The ceiling is therefore the doubled SDP plus generous wrapper/overhead
+ * slack. Raised from `MAX_B64_CHUNK_LEN + 1024` specifically so a full 64 KiB
+ * sdp offer or answer (the live A/V signaling payload) is always admissible on
+ * the wire — without that, an sdp full of CRLF line endings would be rejected
+ * at the line-length gate before parseFrame ever saw it.
+ */
+const MAX_FRAME_LEN = Math.max(MAX_B64_CHUNK_LEN, 2 * MAX_SDP_LEN) + 2048;
 
 export type Frame =
   | { t: 'hello'; handle: string; league: string; harness: string }
@@ -22,10 +40,19 @@ export type Frame =
   | { t: 'bye' }
   | { t: 'media-start'; id: string; mime: string; size: number; name: string }
   | { t: 'media-chunk'; id: string; seq: number; b64: string }
-  | { t: 'media-end'; id: string };
+  | { t: 'media-end'; id: string }
+  | { t: 'rtc-offer'; sdp: string }
+  | { t: 'rtc-answer'; sdp: string }
+  | { t: 'rtc-ice'; candidate: string };
 
 /** Convenience union of the three media-transfer frame types. */
 export type MediaFrame = Extract<Frame, { t: `media-${string}` }>;
+
+/** Convenience union of the three WebRTC signaling frame types (offer / answer
+ *  / ice). Live A/V runs in the BROWSER via a native RTCPeerConnection; these
+ *  frames only RELAY signaling over the P2P socket — no media bytes, no native
+ *  WebRTC dependency in the CLI. */
+export type RtcFrame = Extract<Frame, { t: `rtc-${string}` }>;
 
 export function serializeFrame(f: Frame): string {
   return JSON.stringify(f);
@@ -82,6 +109,23 @@ export function parseFrame(raw: string | Buffer): Frame | null {
       const id = r['id'];
       if (typeof id !== 'string' || id.length === 0 || id.length > MAX_ID_LEN) return null;
       return { t: 'media-end', id };
+    }
+    case 'rtc-offer': {
+      const sdp = r['sdp'];
+      if (typeof sdp !== 'string' || sdp.length === 0 || sdp.length > MAX_SDP_LEN) return null;
+      return { t: 'rtc-offer', sdp };
+    }
+    case 'rtc-answer': {
+      const sdp = r['sdp'];
+      if (typeof sdp !== 'string' || sdp.length === 0 || sdp.length > MAX_SDP_LEN) return null;
+      return { t: 'rtc-answer', sdp };
+    }
+    case 'rtc-ice': {
+      const candidate = r['candidate'];
+      // An empty candidate string is a legal trickle-ICE "end of gathering"
+      // marker, so only the upper bound is enforced here (no minimum length).
+      if (typeof candidate !== 'string' || candidate.length > MAX_CANDIDATE_LEN) return null;
+      return { t: 'rtc-ice', candidate };
     }
     default: return null;
   }
