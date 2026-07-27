@@ -397,6 +397,49 @@ export const webAppHtml = `<!DOCTYPE html>
     .stage{ padding: 22px 18px 80px; }
     header.topbar{ padding: 13px 16px; flex-wrap: wrap; }
   }
+
+  /* ---- live A/V (browser WebRTC over the local signaling relay) ---- */
+  .live-panel{
+    position: fixed; left: 18px; bottom: 18px; z-index: 45;
+    background: linear-gradient(180deg, var(--bg-card), var(--bg-card-2));
+    border: 1px solid var(--border-2); border-radius: 16px; box-shadow: var(--shadow-2);
+    padding: 12px 14px; min-width: 220px; max-width: 260px; display: none;
+  }
+  .live-panel.is-open{ display: block; animation: rise var(--dur-med) var(--ease-out); }
+  .live-panel .lp-title{ font-size: .78rem; font-weight: 800; margin-bottom: 8px; display: flex; align-items: center; gap: 6px; }
+  .live-panel .lp-dot{ width: 7px; height: 7px; border-radius: 50%; background: var(--coral); box-shadow: 0 0 0 3px rgba(255,122,104,.18); flex-shrink: 0; }
+  .live-row{ display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 7px 0; border-top: 1px solid var(--border); }
+  .live-row:first-of-type{ border-top: 0; }
+  .live-row .h{ font-size: .84rem; font-weight: 600; }
+  .live-row .s{ font-size: .7rem; color: var(--muted-2); }
+  .live-row .vbtn{
+    border: 0; border-radius: 9px; padding: 7px 12px; font-weight: 700; font-size: .76rem;
+    background: linear-gradient(180deg, var(--coral), var(--coral-dim)); color: #2a1109;
+    transition: transform var(--dur-fast) var(--ease-out), filter var(--dur-fast) ease;
+    flex-shrink: 0;
+  }
+  .live-row .vbtn:hover{ filter: brightness(1.06); }
+  .live-row .vbtn:active{ transform: scale(.95); }
+  .live-row .vbtn:disabled{ opacity: .4; cursor: not-allowed; }
+  .video-modal{
+    position: fixed; inset: 0; z-index: 70;
+    display: flex; align-items: center; justify-content: center; gap: 18px; flex-wrap: wrap;
+    background: rgba(12,7,15,.78); backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px);
+    opacity: 0; pointer-events: none; transition: opacity var(--dur-med) ease;
+  }
+  .video-modal.is-open{ opacity: 1; pointer-events: auto; }
+  .video-modal .vtile{ display: flex; flex-direction: column; align-items: center; gap: 8px; }
+  .video-modal video{
+    width: min(42vw, 560px); aspect-ratio: 4 / 3; background: #000; border-radius: 16px;
+    border: 1px solid var(--border-2); box-shadow: var(--shadow-3); object-fit: cover;
+  }
+  .video-modal .vlabel{ font-size: .8rem; color: var(--muted); font-weight: 600; }
+  .video-modal .vhangup{
+    position: absolute; bottom: 28px; left: 50%; transform: translateX(-50%);
+    border: 0; border-radius: 999px; padding: 12px 22px; font-weight: 800; font-size: .9rem;
+    background: var(--danger); color: #2a0a0c;
+  }
+  .video-modal .vhangup:hover{ filter: brightness(1.06); }
 </style>
 </head>
 <body>
@@ -539,6 +582,17 @@ export const webAppHtml = `<!DOCTYPE html>
     <p id="celebrateText">You're both in the same league.</p>
     <button class="btn btn-primary" id="btnCelebrateClose" type="button">Keep swiping</button>
   </div>
+</div>
+
+<aside class="live-panel" id="livePanel" aria-label="Live same-league peers">
+  <div class="lp-title"><span class="lp-dot" aria-hidden="true"></span> Live same-league peers</div>
+  <div id="liveRows"></div>
+</aside>
+
+<div class="video-modal" id="videoModal" role="dialog" aria-modal="true" aria-label="Video call">
+  <div class="vtile"><video id="remoteVideo" autoplay playsinline></video><div class="vlabel" id="remoteLabel">remote</div></div>
+  <div class="vtile"><video id="localVideo" autoplay playsinline muted></video><div class="vlabel">you</div></div>
+  <button class="vhangup" id="hangupBtn" type="button">Hang up</button>
 </div>
 
 <script>
@@ -820,6 +874,211 @@ export const webAppHtml = `<!DOCTYPE html>
 
   fetch("/api/state").then(function(r){ return r.json(); }).then(function(s){ applyState(s); }).catch(function(){ showStep("idle"); });
 
+})();
+</script>
+
+<script>
+(function(){
+  "use strict";
+  /* ---- Live A/V: browser WebRTC over the local server's signaling relay ----
+   * The browser owns the RTCPeerConnection (mic/camera capture, DTLS, SRTP);
+   * the local server only ferries rtc-offer / rtc-answer / rtc-ice frames
+   * between this browser and the remote peer's PeerLink. No media bytes touch
+   * the server, and no native WebRTC dep ships with the CLI. */
+
+  var livePanel = document.getElementById("livePanel");
+  var liveRows = document.getElementById("liveRows");
+  var videoModal = document.getElementById("videoModal");
+  var localVideo = document.getElementById("localVideo");
+  var remoteVideo = document.getElementById("remoteVideo");
+  var remoteLabel = document.getElementById("remoteLabel");
+  var hangupBtn = document.getElementById("hangupBtn");
+
+  // One in-flight call's state. remoteHandle === null means idle.
+  var rtc = { pc: null, localStream: null, remoteHandle: null, role: null };
+  var knownPeers = [];
+  var idleIdx = 0;
+
+  function rtcConfig(){
+    // A public STUN server crosses most NATs. No TURN in v0 — symmetric NATs
+    // won't connect, but signaling still completes and the call fails open.
+    return { iceServers: [{ urls: "stun:stun.l.google.com:19302" }] };
+  }
+  function sleep(ms){ return new Promise(function(r){ setTimeout(r, ms); }); }
+
+  // GET /live/signal?handle=X with a client-side abort so we never pile up
+  // concurrent long-polls; on abort/error the caller just retries.
+  function fetchSignal(handle, timeoutMs){
+    var ctrl = new AbortController();
+    var t = setTimeout(function(){ ctrl.abort(); }, timeoutMs);
+    return fetch("/live/signal?handle=" + encodeURIComponent(handle), { signal: ctrl.signal })
+      .then(function(r){ clearTimeout(t); return r; })
+      .catch(function(e){ clearTimeout(t); throw e; });
+  }
+
+  async function postSignal(handle, frame){
+    try {
+      await fetch("/live/signal", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ handle: handle, frame: frame })
+      });
+    } catch(e){ /* best effort — a dropped signal just slows the handshake */ }
+  }
+
+  function showVideoModal(remoteHandle){
+    remoteLabel.textContent = remoteHandle;
+    videoModal.classList.add("is-open");
+  }
+
+  function attachTracks(pc, stream){
+    stream.getTracks().forEach(function(t){ pc.addTrack(t, stream); });
+  }
+
+  // Offerer path: the user clicked our Video button.
+  async function startCallAsOfferer(handle){
+    rtc.role = "offerer";
+    rtc.remoteHandle = handle;
+    rtc.localStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+    localVideo.srcObject = rtc.localStream;
+    var pc = new RTCPeerConnection(rtcConfig());
+    rtc.pc = pc;
+    pc.onicecandidate = onIce;
+    pc.ontrack = function(e){ remoteVideo.srcObject = e.streams[0]; };
+    attachTracks(pc, rtc.localStream);
+    var offer = await pc.createOffer();
+    await pc.setLocalDescription(offer);
+    await postSignal(handle, { t: "rtc-offer", sdp: offer.sdp });
+    showVideoModal(handle);
+    pollSignal(handle);
+  }
+
+  // Answerer path: we received the peer's offer via the relay.
+  async function answerIncomingOffer(handle, sdp){
+    rtc.role = "answerer";
+    rtc.remoteHandle = handle;
+    rtc.localStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+    localVideo.srcObject = rtc.localStream;
+    var pc = new RTCPeerConnection(rtcConfig());
+    rtc.pc = pc;
+    pc.onicecandidate = onIce;
+    pc.ontrack = function(e){ remoteVideo.srcObject = e.streams[0]; };
+    attachTracks(pc, rtc.localStream);
+    await pc.setRemoteDescription({ type: "offer", sdp: sdp });
+    var answer = await pc.createAnswer();
+    await pc.setLocalDescription(answer);
+    await postSignal(handle, { t: "rtc-answer", sdp: answer.sdp });
+    showVideoModal(handle);
+    pollSignal(handle);
+  }
+
+  function onIce(e){
+    if (!rtc.remoteHandle) return;
+    if (e.candidate) {
+      // Trickle ICE: ship each candidate the moment it is gathered.
+      postSignal(rtc.remoteHandle, { t: "rtc-ice", candidate: e.candidate.candidate });
+    } else {
+      // Gathering complete — send the end-of-candidates marker.
+      postSignal(rtc.remoteHandle, { t: "rtc-ice", candidate: "" });
+    }
+  }
+
+  // Active long-poll loop for the peer we're in a call with. Drains answer +
+  // ICE candidates until the call ends.
+  async function pollSignal(handle){
+    while (rtc.remoteHandle === handle && rtc.pc && rtc.pc.connectionState !== "closed") {
+      var res;
+      try { res = await fetchSignal(handle, 5000); }
+      catch(e){ await sleep(500); continue; }
+      if (!res || res.status !== 200) { await sleep(500); continue; }
+      var data = await res.json();
+      var f = data && data.frame;
+      if (!f) continue; // timed out empty
+      await handleIncoming(handle, f);
+    }
+  }
+
+  async function handleIncoming(handle, f){
+    // An offer arriving with no active PC makes us the answerer.
+    if (!rtc.pc) {
+      if (f.t === "rtc-offer") { await answerIncomingOffer(handle, f.sdp); }
+      return;
+    }
+    if (f.t === "rtc-answer") {
+      try { await rtc.pc.setRemoteDescription({ type: "answer", sdp: f.sdp }); } catch(e){}
+    } else if (f.t === "rtc-ice") {
+      try { await rtc.pc.addIceCandidate({ candidate: f.candidate }); } catch(e){}
+    }
+  }
+
+  // Idle listener: when not in a call, watch known peers round-robin so an
+  // incoming offer (the peer clicked THEIR Video button) is noticed and answered.
+  async function idleLoop(){
+    while (true) {
+      if (rtc.remoteHandle || knownPeers.length === 0) { await sleep(1000); continue; }
+      var peer = knownPeers[idleIdx % knownPeers.length];
+      idleIdx++;
+      try {
+        var res = await fetchSignal(peer.handle, 3000);
+        if (res && res.status === 200) {
+          var data = await res.json();
+          var f = data && data.frame;
+          if (f && f.t === "rtc-offer" && !rtc.pc && !rtc.remoteHandle) {
+            await answerIncomingOffer(peer.handle, f.sdp);
+          }
+        }
+      } catch(e){ /* abort/timeout — loop to next peer */ }
+    }
+  }
+  idleLoop();
+
+  function hangup(){
+    try { if (rtc.pc) rtc.pc.close(); } catch(e){}
+    rtc.pc = null;
+    rtc.remoteHandle = null;
+    rtc.role = null;
+    if (rtc.localStream) {
+      rtc.localStream.getTracks().forEach(function(t){ t.stop(); });
+      rtc.localStream = null;
+    }
+    localVideo.srcObject = null;
+    remoteVideo.srcObject = null;
+    videoModal.classList.remove("is-open");
+  }
+  hangupBtn.addEventListener("click", hangup);
+
+  // Render the live-peers panel with a Video button each.
+  async function refreshPeers(){
+    try {
+      var res = await fetch("/api/live/peers");
+      if (res.status !== 200) return;
+      var data = await res.json();
+      var peers = (data && data.peers) || [];
+      knownPeers = peers;
+      if (peers.length === 0) { livePanel.classList.remove("is-open"); return; }
+      livePanel.classList.add("is-open");
+      liveRows.innerHTML = "";
+      peers.forEach(function(p){
+        var row = document.createElement("div");
+        row.className = "live-row";
+        var who = document.createElement("div");
+        var h = document.createElement("div"); h.className = "h"; h.textContent = p.handle;
+        var s = document.createElement("div"); s.className = "s"; s.textContent = p.league + " \u00b7 " + p.harness;
+        who.appendChild(h); who.appendChild(s);
+        var btn = document.createElement("button");
+        btn.className = "vbtn"; btn.type = "button"; btn.textContent = "Video";
+        btn.addEventListener("click", function(){
+          if (rtc.remoteHandle) return; // already in a call
+          btn.disabled = true;
+          startCallAsOfferer(p.handle).catch(function(){ btn.disabled = false; });
+        });
+        row.appendChild(who); row.appendChild(btn);
+        liveRows.appendChild(row);
+      });
+    } catch(e){}
+  }
+  refreshPeers();
+  setInterval(refreshPeers, 4000);
 })();
 </script>
 </body>
