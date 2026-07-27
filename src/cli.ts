@@ -12,10 +12,12 @@
  *
  * No new deps: a tiny hand-rolled arg parser (parseArgs) over process.argv.
  */
+import readline from 'node:readline';
 import { pathToFileURL } from 'node:url';
 import process from 'node:process';
 import { CANDIDATES, league, leagueIndex, matches, readUsage, type Harness } from './index.js';
 import { LIVE_NOTICE, loadPeers, startDiscovery, TOPIC_PREFIX, type PeerHello } from './p2p.js';
+import { createPairing } from './pairing.js';
 import { canShareLive, connectProfile, grantLiveConsent, loadProfile } from './state.js';
 import { startServer } from './server.js';
 import { runMcp } from './mcp.js';
@@ -24,7 +26,16 @@ import { runMcp } from './mcp.js';
 const VERSION = '0.1.0';
 
 /** Recognized top-level commands, plus the synthetic help/version. */
-export type Command = 'connect' | 'matches' | 'discover' | 'open' | 'mcp' | 'help' | 'version' | null;
+export type Command =
+  | 'connect'
+  | 'matches'
+  | 'discover'
+  | 'open'
+  | 'live'
+  | 'mcp'
+  | 'help'
+  | 'version'
+  | null;
 
 export interface ParsedArgs {
   readonly command: Command;
@@ -32,6 +43,8 @@ export interface ParsedArgs {
   readonly port: number | undefined;
   /** Explicit opt-in to live P2P discovery (`discover --live`). Default false. */
   readonly live: boolean;
+  /** `live --dating`: pick-a-handle mode vs omegle auto-pair. Default false. */
+  readonly dating: boolean;
 }
 
 function parsePort(raw: string): number | undefined {
@@ -45,13 +58,21 @@ function parsePort(raw: string): number | undefined {
  * Pure: no IO, no process access — trivially unit-testable.
  */
 export function parseArgs(argv: readonly string[]): ParsedArgs {
-  let out: ParsedArgs = { command: null, port: undefined, live: false };
+  let out: ParsedArgs = { command: null, port: undefined, live: false, dating: false };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i]!;
-    if (a === '--version' || a === '-v') return { command: 'version', port: undefined, live: false };
-    if (a === '--help' || a === '-h') return { command: 'help', port: undefined, live: false };
+    if (a === '--version' || a === '-v') {
+      return { command: 'version', port: undefined, live: false, dating: false };
+    }
+    if (a === '--help' || a === '-h') {
+      return { command: 'help', port: undefined, live: false, dating: false };
+    }
     if (a === '--live') {
       out = { ...out, live: true };
+      continue;
+    }
+    if (a === '--dating') {
+      out = { ...out, dating: true };
       continue;
     }
     if (a === '--port') {
@@ -70,7 +91,13 @@ export function parseArgs(argv: readonly string[]): ParsedArgs {
     }
     if (a.startsWith('-')) continue; // ignore unknown flags
     const known: Command =
-      a === 'connect' || a === 'matches' || a === 'discover' || a === 'open' || a === 'mcp' || a === 'help'
+      a === 'connect' ||
+      a === 'matches' ||
+      a === 'discover' ||
+      a === 'open' ||
+      a === 'live' ||
+      a === 'mcp' ||
+      a === 'help'
         ? a
         : null;
     if (known !== null && out.command === null) {
@@ -210,12 +237,111 @@ async function cmdOpen(port: number | undefined): Promise<number> {
   return 0;
 }
 
+/**
+ * `vibedating live [--dating]` — live text chat with same-league peers.
+ *
+ * Omegle by default (auto-pair; `/next` rolls a new peer). `--dating` advertises
+ * pick-a-handle mode (`/open <handle>`). Consent-gated exactly like `discover`
+ * (the command IS the opt-in). The wire protocol + pairing policy are unit
+ * tested; this readline loop is manual-smoke only.
+ */
+async function cmdLive(dating: boolean): Promise<number> {
+  const profile = loadProfile();
+  if (!profile) {
+    process.stderr.write('Not connected yet. Run `vibedating connect` first.\n');
+    return 1;
+  }
+  // The `live` command IS the opt-in (mirrors `discover --live`).
+  if (!canShareLive()) grantLiveConsent();
+  if (!canShareLive()) {
+    process.stderr.write('Could not enable live discovery. Try `vibedating discover --live`.\n');
+    return 1;
+  }
+
+  const hello: PeerHello = {
+    handle: profile.handle,
+    league: profile.league,
+    harness: profile.harness,
+  };
+  process.stdout.write('\n');
+  process.stdout.write(`  ${LIVE_NOTICE}\n`);
+  process.stdout.write(
+    dating
+      ? '  dating mode — /open <handle> to pick a peer\n'
+      : '  omegle mode — /next to roll a new peer\n',
+  );
+
+  const pairing = createPairing();
+  pairing.onMatch((link) => {
+    if (link === undefined) {
+      process.stdout.write('  · idle — no peer right now\n');
+      return;
+    }
+    process.stdout.write(
+      `  · matched ${link.hello.handle} (${link.hello.league} · ${link.hello.harness})\n`,
+    );
+    link.onMessage((m) => {
+      process.stdout.write(`  <${link.hello.handle}> ${m.text}\n`);
+    });
+  });
+
+  const session = await startDiscovery({
+    hello,
+    onLink: (link) => pairing.add(link),
+  });
+  process.stdout.write(
+    `  topic: ${TOPIC_PREFIX}${profile.league} → ${session.topic.toString('hex').slice(0, 12)}…\n`,
+  );
+  process.stdout.write('  type to chat · /next · /open <handle> · /quit\n\n');
+
+  // Read stdin line by line; slash-commands drive the pairing policy.
+  const rl = readline.createInterface({ input: process.stdin, terminal: false });
+  const stop = (): void => {
+    rl.close();
+  };
+  process.once('SIGINT', stop);
+  process.once('SIGTERM', stop);
+
+  for await (const line of rl) {
+    const text = line.trim();
+    if (text === '/quit') break;
+    if (text === '/next') {
+      pairing.next();
+      continue;
+    }
+    if (text.startsWith('/open ')) {
+      const handle = text.slice('/open '.length).trim();
+      if (pairing.open(handle) === undefined) {
+        process.stdout.write(`  · no available peer "${handle}"\n`);
+      }
+      continue;
+    }
+    if (text === '') continue;
+    const cur = pairing.current();
+    if (cur !== undefined) {
+      cur.send(text);
+    } else {
+      process.stdout.write('  · no peer yet — waiting for a match…\n');
+    }
+  }
+
+  process.removeListener('SIGINT', stop);
+  process.removeListener('SIGTERM', stop);
+  const cur = pairing.current();
+  if (cur !== undefined) cur.close();
+  process.stdout.write('\n  leaving the swarm…\n');
+  await session.close();
+  process.stdout.write('\n');
+  return 0;
+}
+
 const HELP = `vibedating ${VERSION} — dating by tokens (local-first)
 
 Usage:
   vibedating connect            Read your usage, compute + print your league
   vibedating matches [--live]   List candidates in your league (live peers if any)
   vibedating discover [--live]  Find live same-league peers over the DHT (opt-in)
+  vibedating live [--dating]    Live chat with same-league peers (omegle /next, or --dating pick)
   vibedating open [--port N]    Serve the local web app (default: random port)
   vibedating mcp                Run the stdio MCP server (profile, matches)
   vibedating --version
@@ -250,6 +376,8 @@ async function main(argv: readonly string[]): Promise<number> {
       return cmdDiscover(parsed.live);
     case 'open':
       return cmdOpen(parsed.port);
+    case 'live':
+      return cmdLive(parsed.dating);
     case 'mcp':
       await runMcp();
       return 0;
