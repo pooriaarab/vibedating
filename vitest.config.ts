@@ -8,6 +8,7 @@ export default defineConfig({
       ['**/p2p.integration.test.ts', 'forks'],
       ['**/live.integration.test.ts', 'forks'],
       ['**/media.integration.test.ts', 'forks'],
+      ['**/signal.integration.test.ts', 'forks'],
     ],
   },
 });

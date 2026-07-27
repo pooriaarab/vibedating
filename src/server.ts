@@ -21,11 +21,96 @@ import { makeEvent, notify as vibeCoreNotify } from '@pooriaarab/vibe-core';
 import type { VibeEvent } from '@pooriaarab/vibe-core';
 import type { Candidate } from './index.js';
 import { CANDIDATES, matches, readUsage } from './index.js';
+import { parseFrame, type RtcFrame } from './frame.js';
+import type { PeerLink } from './link.js';
 import { connectProfile, loadProfile, type ProfileState } from './state.js';
 import { webAppHtml } from './web-app-html.js';
 
 /** Sink for milestone notifications. Injectable so tests can capture events. */
 export type NotifySink = (event: VibeEvent) => void;
+
+/* -------------------------------------------------------------------------- */
+/* Live A/V signaling bridge (browser <-> local server <-> PeerLink)          */
+/* -------------------------------------------------------------------------- */
+
+/** A connected live peer, as the web app needs to see it. */
+export interface LivePeerInfo {
+  readonly handle: string;
+  readonly league: string;
+  readonly harness: string;
+}
+
+/**
+ * Bridge between the browser's WebRTC stack and the P2P {@link PeerLink}s.
+ *
+ * The browser talks to the local server over HTTP (POST to send, long-poll to
+ * receive); the server relays each `rtc-*` frame to/from the matching peer's
+ * PeerLink via {@link PeerLink.sendSignal} / {@link PeerLink.onSignal}. Live
+ * MEDIA never touches the server — only SDP / ICE strings do. The server is a
+ * pure signaling relay; the real RTCPeerConnection lives in the browser, so no
+ * native WebRTC dependency is pulled into the CLI.
+ */
+export interface LiveBridge {
+  /** Snapshot of currently-connected live peers. */
+  readonly peers: readonly LivePeerInfo[];
+  /** Attach a freshly-handshaken PeerLink (from a discovery session's onLink). */
+  addLink(link: PeerLink): void;
+  /** Send one rtc-* signaling frame to the peer identified by `handle`. */
+  sendSignal(handle: string, frame: RtcFrame): void;
+  /** Long-poll for the next incoming rtc-* frame from `handle`. Resolves with
+   *  the frame, or null on timeout / when the peer is unknown. */
+  pollSignal(handle: string, timeoutMs: number): Promise<RtcFrame | null>;
+}
+
+interface PeerMailbox {
+  readonly link: PeerLink;
+  /** Incoming rtc-* frames from this peer, drained by the browser long-poll. */
+  readonly incoming: RtcFrame[];
+}
+
+/** Build a {@link LiveBridge}. Holds no resources of its own; callers attach
+ *  PeerLinks from a discovery session via {@link LiveBridge.addLink}. */
+export function createLiveBridge(): LiveBridge {
+  const boxes = new Map<string, PeerMailbox>();
+
+  const bridge: LiveBridge = {
+    get peers(): readonly LivePeerInfo[] {
+      return [...boxes.values()].map((m) => m.link.hello);
+    },
+    addLink(link) {
+      const handle = link.hello.handle;
+      boxes.set(handle, { link, incoming: [] });
+      // Route every rtc-* frame the peer sends into this peer's mailbox.
+      link.onSignal((f) => {
+        const mb = boxes.get(handle);
+        if (mb) mb.incoming.push(f);
+      });
+      link.onClose(() => {
+        // Only drop the entry if THIS link is still the current one for the
+        // handle (a reconnect may have already replaced it).
+        const cur = boxes.get(handle);
+        if (cur && cur.link === link) boxes.delete(handle);
+      });
+    },
+    sendSignal(handle, frame) {
+      boxes.get(handle)?.link.sendSignal(frame);
+    },
+    async pollSignal(handle, timeoutMs) {
+      const mb = boxes.get(handle);
+      if (!mb) return null;
+      if (mb.incoming.length > 0) return mb.incoming.shift() ?? null;
+      const deadline = Date.now() + timeoutMs;
+      while (Date.now() < deadline) {
+        await new Promise((r) => setTimeout(r, 100));
+        const cur = boxes.get(handle);
+        if (!cur) return null; // peer vanished mid-poll
+        if (cur.incoming.length > 0) return cur.incoming.shift() ?? null;
+      }
+      return null;
+    },
+  };
+  return bridge;
+}
 
 /** Shape served to the page. `totalTokens` is local-only by contract. */
 export interface ServerState {
@@ -50,6 +135,11 @@ export interface StartServerOptions {
   readonly dir?: string;
   /** Override the notification sink (tests). Defaults to vibe-core's `notify`. */
   readonly notify?: NotifySink;
+  /** Optional live-signaling bridge. When set, the server exposes
+   *  `/api/live/peers` + `/live/signal` so the web app can do browser WebRTC
+   *  with the bridge's connected peers. Omit (tests) to keep the server a pure
+   *  local-data server with no live routes active. */
+  readonly live?: LiveBridge;
 }
 
 export interface StartedServer {
@@ -202,6 +292,74 @@ async function handle(
       }
     }
     sendJson(res, 200, { matched, handle: candidate.handle, league: candidate.league });
+    return;
+  }
+
+  if (req.method === 'GET' && pathname === '/api/live/peers') {
+    const live = opts.live;
+    sendJson(res, 200, { peers: live ? live.peers : [] });
+    return;
+  }
+
+  // GET /live/signal?handle=<peerHandle>  — long-poll for the next incoming
+  // rtc-* frame from that peer. Returns {frame} where frame is the parsed
+  // RtcFrame or null on timeout. The browser loops on this to receive the
+  // remote's answer + trickle ICE candidates.
+  if (req.method === 'GET' && pathname === '/live/signal') {
+    const live = opts.live;
+    if (!live) {
+      sendJson(res, 200, { frame: null, reason: 'live-not-attached' });
+      return;
+    }
+    const handle = url.searchParams.get('handle') ?? '';
+    if (handle === '') {
+      sendJson(res, 400, { error: 'missing handle' });
+      return;
+    }
+    const frame = await live.pollSignal(handle, 25_000);
+    // The client may have hung up while we were long-polling — don't write to a
+    // dead socket.
+    if (req.destroyed || res.writableEnded) return;
+    sendJson(res, 200, { frame });
+    return;
+  }
+
+  // POST /live/signal  {handle, frame}  — relay one rtc-* frame from the
+  // browser to the peer's PeerLink. The frame is re-parsed through parseFrame's
+  // allowlist so a browser can NEVER smuggle extra keys / oversized payloads
+  // onto the P2P wire.
+  if (req.method === 'POST' && pathname === '/live/signal') {
+    const live = opts.live;
+    if (!live) {
+      sendJson(res, 400, { error: 'live-not-attached' });
+      return;
+    }
+    const body = await readBody(req);
+    let parsed: Record<string, unknown> = {};
+    try {
+      parsed = JSON.parse(body) as Record<string, unknown>;
+    } catch {
+      sendJson(res, 400, { error: 'invalid JSON body' });
+      return;
+    }
+    const handle = typeof parsed['handle'] === 'string' ? parsed['handle'] : '';
+    if (handle === '') {
+      sendJson(res, 400, { error: 'missing handle' });
+      return;
+    }
+    // Re-serialize + re-parse the claimed frame through parseFrame BEFORE it
+    // reaches the PeerLink. The only thing that should be here is a browser
+    // RTCSessionDescription / ICE candidate, but we do not trust it.
+    const reParsed = parseFrame(JSON.stringify(parsed['frame']));
+    if (
+      reParsed === null ||
+      (reParsed.t !== 'rtc-offer' && reParsed.t !== 'rtc-answer' && reParsed.t !== 'rtc-ice')
+    ) {
+      sendJson(res, 400, { error: 'invalid rtc frame' });
+      return;
+    }
+    live.sendSignal(handle, reParsed);
+    sendJson(res, 200, { ok: true });
     return;
   }
 

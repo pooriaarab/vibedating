@@ -7,6 +7,10 @@
  *   - {@link PeerLink.onClose} fires when the peer hangs up (a `bye` frame,
  *     or the socket ending),
  *   - {@link PeerLink.close} is the omegle "next": writes `bye`, then ends.
+ *   - {@link PeerLink.sendMedia} / {@link PeerLink.onMedia} move chunked files,
+ *   - {@link PeerLink.sendSignal} / {@link PeerLink.onSignal} relay the three
+ *     `rtc-*` WebRTC signaling frames (offer / answer / ice). Live A/V itself
+ *     runs in the browser; these only ferry signaling over the P2P socket.
  *
  * Everything on the wire goes through {@link parseFrame}'s allowlist, so a peer
  * can never smuggle extra fields onto a `msg` (and thus never a raw-usage field).
@@ -20,7 +24,7 @@
  */
 import { randomUUID } from 'node:crypto';
 import type { Duplex } from 'node:stream';
-import { parseFrame, serializeFrame, type Frame, type MediaFrame } from './frame.js';
+import { parseFrame, serializeFrame, type Frame, type MediaFrame, type RtcFrame } from './frame.js';
 import {
   MediaReceiver,
   type ReceivedMedia,
@@ -43,10 +47,15 @@ export interface PeerLink {
     filePath: string,
     opts?: { mime?: string; name?: string },
   ): Promise<{ id: string; size: number }>;
+  /** Relay one `rtc-*` signaling frame (offer / answer / ice) to the peer.
+   *  Live media never touches this socket — only SDP / ICE strings do. */
+  sendSignal(frame: RtcFrame): void;
   /** Register a callback for each incoming `msg` frame. */
   onMessage(cb: (m: { id: string; text: string; at: number }) => void): void;
   /** Register a callback fired for each fully-reassembled incoming media file. */
   onMedia(cb: (m: ReceivedMedia) => void): void;
+  /** Register a callback fired for each incoming `rtc-*` signaling frame. */
+  onSignal(cb: (f: RtcFrame) => void): void;
   /** Register a callback fired once when the peer closes the link. */
   onClose(cb: () => void): void;
   /** Omegle "next": write a `bye` frame, then end the socket. */
@@ -66,6 +75,7 @@ export function createPeerLink(
 ): PeerLink {
   const messageCbs = new Set<(m: { id: string; text: string; at: number }) => void>();
   const mediaCbs = new Set<(m: ReceivedMedia) => void>();
+  const signalCbs = new Set<(f: RtcFrame) => void>();
   const closeCbs = new Set<() => void>();
   let buf = initialBuffer;
   let closed = false;
@@ -97,6 +107,13 @@ export function createPeerLink(
       case 'media-chunk':
       case 'media-end': {
         mediaReceiver?.handle(frame as MediaFrame);
+        break;
+      }
+      case 'rtc-offer':
+      case 'rtc-answer':
+      case 'rtc-ice': {
+        const f = frame as RtcFrame;
+        for (const cb of signalCbs) cb(f);
         break;
       }
       case 'bye': {
@@ -163,12 +180,19 @@ export function createPeerLink(
       if (closed) return { id: '', size: 0 };
       return sendMediaFile({ socket, path: filePath, mime: opts.mime, name: opts.name });
     },
+    sendSignal(frame) {
+      if (closed) return;
+      socket.write(serializeFrame(frame) + '\n');
+    },
     onMessage(cb) {
       messageCbs.add(cb);
     },
     onMedia(cb) {
       ensureMediaReceiver();
       mediaCbs.add(cb);
+    },
+    onSignal(cb) {
+      signalCbs.add(cb);
     },
     onClose(cb) {
       closeCbs.add(cb);

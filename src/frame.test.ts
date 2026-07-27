@@ -1,9 +1,11 @@
 import { describe, expect, it } from 'vitest';
 import {
   MAX_B64_CHUNK_LEN,
+  MAX_CANDIDATE_LEN,
   MAX_MEDIA_SIZE,
   MAX_MIME_LEN,
   MAX_NAME_LEN,
+  MAX_SDP_LEN,
   parseFrame,
   serializeFrame,
   type Frame,
@@ -121,5 +123,90 @@ describe('frame protocol — media frames', () => {
   it('admits a maximum-size media-chunk (16 KiB b64) within the frame cap', () => {
     const f = { t: 'media-chunk', id: 'm', seq: 0, b64: 'A'.repeat(MAX_B64_CHUNK_LEN) };
     expect(parseFrame(serializeFrame(f as unknown as Frame))).toEqual(f);
+  });
+});
+
+describe('frame protocol — rtc signaling frames', () => {
+  it('round-trips an rtc-offer frame', () => {
+    const f: Frame = { t: 'rtc-offer', sdp: 'v=0\r\no=- 1 1 IN IP4 127.0.0.1\r\ns=-\r\n' };
+    expect(parseFrame(serializeFrame(f))).toEqual(f);
+  });
+  it('round-trips an rtc-answer frame', () => {
+    const f: Frame = { t: 'rtc-answer', sdp: 'v=0\r\no=- 2 1 IN IP4 127.0.0.1\r\n' };
+    expect(parseFrame(serializeFrame(f))).toEqual(f);
+  });
+  it('round-trips an rtc-ice frame', () => {
+    const f: Frame = {
+      t: 'rtc-ice',
+      candidate: 'candidate:842163049 1 udp 1677729535 73.4.2.1 64737 typ srflx',
+    };
+    expect(parseFrame(serializeFrame(f))).toEqual(f);
+  });
+
+  it('drops extra keys on an rtc-offer frame (allowlist)', () => {
+    const raw = JSON.stringify({
+      t: 'rtc-offer',
+      sdp: 'v=0\r\n',
+      leak: 'raw-usage',
+      impersonator: true,
+    });
+    expect(parseFrame(raw)).toEqual({ t: 'rtc-offer', sdp: 'v=0\r\n' });
+  });
+  it('drops extra keys on an rtc-answer frame (allowlist)', () => {
+    const raw = JSON.stringify({ t: 'rtc-answer', sdp: 'v=0\r\n', leak: 'raw-usage' });
+    expect(parseFrame(raw)).toEqual({ t: 'rtc-answer', sdp: 'v=0\r\n' });
+  });
+  it('drops extra keys on an rtc-ice frame (allowlist)', () => {
+    const raw = JSON.stringify({
+      t: 'rtc-ice',
+      candidate: 'candidate:1 1 udp 1 1.2.3.4 1 typ host',
+      leak: 'raw-usage',
+    });
+    expect(parseFrame(raw)).toEqual({
+      t: 'rtc-ice',
+      candidate: 'candidate:1 1 udp 1 1.2.3.4 1 typ host',
+    });
+  });
+
+  it('rejects rtc-offer with sdp over the 64 KiB cap', () => {
+    expect(parseFrame(JSON.stringify({ t: 'rtc-offer', sdp: 'x'.repeat(MAX_SDP_LEN + 1) }))).toBeNull();
+  });
+  it('rejects rtc-answer with sdp over the 64 KiB cap', () => {
+    expect(
+      parseFrame(JSON.stringify({ t: 'rtc-answer', sdp: 'x'.repeat(MAX_SDP_LEN + 1) })),
+    ).toBeNull();
+  });
+  it('rejects rtc-ice with candidate over the 4 KiB cap', () => {
+    expect(
+      parseFrame(JSON.stringify({ t: 'rtc-ice', candidate: 'x'.repeat(MAX_CANDIDATE_LEN + 1) })),
+    ).toBeNull();
+  });
+  it('rejects rtc-offer / rtc-answer with an empty sdp', () => {
+    expect(parseFrame(JSON.stringify({ t: 'rtc-offer', sdp: '' }))).toBeNull();
+    expect(parseFrame(JSON.stringify({ t: 'rtc-answer', sdp: '' }))).toBeNull();
+  });
+
+  it('rejects rtc frames missing required keys', () => {
+    expect(parseFrame(JSON.stringify({ t: 'rtc-offer' }))).toBeNull(); // no sdp
+    expect(parseFrame(JSON.stringify({ t: 'rtc-answer' }))).toBeNull(); // no sdp
+    expect(parseFrame(JSON.stringify({ t: 'rtc-ice' }))).toBeNull(); // no candidate
+  });
+
+  it('rejects rtc frames with wrong-typed payloads', () => {
+    expect(parseFrame(JSON.stringify({ t: 'rtc-offer', sdp: 42 }))).toBeNull();
+    expect(parseFrame(JSON.stringify({ t: 'rtc-ice', candidate: { x: 1 } }))).toBeNull();
+  });
+
+  it('admits a maximum-size rtc-offer sdp (64 KiB) within the raised frame cap', () => {
+    // A 64 KiB sdp whose every byte is a control char is the WORST case for
+    // JSON escaping (each byte doubles on the wire). The raised MAX_FRAME_LEN
+    // must still admit it.
+    const f = { t: 'rtc-offer', sdp: '\n'.repeat(MAX_SDP_LEN) };
+    expect(parseFrame(serializeFrame(f as unknown as Frame))).toEqual(f);
+  });
+
+  it('admits an empty rtc-ice candidate (trickle end-of-gathering marker)', () => {
+    const f: Frame = { t: 'rtc-ice', candidate: '' };
+    expect(parseFrame(serializeFrame(f))).toEqual(f);
   });
 });
