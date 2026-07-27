@@ -26,8 +26,8 @@
     "test:watch": "vitest"
   },
   "dependencies": {
-    "@pooriaarab/vibe-core": "^0.1.0",
-    "@modelcontextprotocol/sdk": "^1.0.0"
+    "@modelcontextprotocol/sdk": "^1.0.0",
+    "@pooriaarab/vibe-core": "^0.2.0"
   },
   "devDependencies": {
     "@types/node": "^20.11.0",
