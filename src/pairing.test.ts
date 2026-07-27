@@ -17,8 +17,10 @@ function fakeLink(handle: string): FakeLink {
     hello: { handle, league: '10M', harness: 'fake' },
     send: vi.fn(),
     sendMedia: vi.fn().mockResolvedValue({ id: '', size: 0 }),
+    sendSignal: vi.fn(),
     onMessage: vi.fn(),
     onMedia: vi.fn(),
+    onSignal: vi.fn(),
     onClose: (cb: () => void) => {
       closeCb = cb;
     },
