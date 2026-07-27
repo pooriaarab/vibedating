@@ -228,3 +228,16 @@ export function matches(
 /* Re-export the vibe-core primitives this product is built on, for convenience. */
 export { createConsentLedger } from '@pooriaarab/vibe-core';
 export type { Harness, UsageSnapshot } from '@pooriaarab/vibe-core';
+
+/* Live P2P matching (hyperswarm DHT). Consent-gated; raw usage never leaves. */
+export {
+  leagueTopic,
+  LIVE_NOTICE,
+  loadPeers,
+  parseHandshake,
+  recordPeer,
+  serializeHandshake,
+  startDiscovery,
+  TOPIC_PREFIX,
+} from './p2p.js';
+export type { DiscoveryOptions, DiscoverySession, PeerHello, StoredPeer } from './p2p.js';

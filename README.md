@@ -11,8 +11,9 @@ Part of the **Vibe Suite** — companion tools for agentic coding CLIs. Ships as
 
 > **Local-first.** Raw token usage is read and stored on your own machine and
 > **never leaves it.** Only the coarse league *bucket* is ever shared — never the
-> raw number, never per-project breakdowns. v0 has no central directory; the match
-> pool is a local seeded demo.
+> raw number, never per-project breakdowns. Live matching is peer-to-peer over a
+> DHT (no central server) and **opt-in only**; without it the pool is a local
+> seeded demo.
 
 ## Status
 
@@ -42,7 +43,10 @@ vibedating connect
 # 2. See candidates in your league (same or adjacent tier)
 vibedating matches
 
-# 3. Open the local web app in your browser (served from your machine)
+# 3. (Opt-in) find live same-league peers over the DHT — no server
+vibedating discover --live        # shares ONLY handle + league + harness
+
+# 4. Open the local web app in your browser (served from your machine)
 vibedating open
 ```
 
@@ -56,12 +60,26 @@ VIBEDATING_TOKENS=23400000 vibedating connect   # also accepts 12M / 1.2B / 500k
 
 ```
 vibedating connect            Read usage, compute + print your league
-vibedating matches            List candidates in your league
+vibedating matches [--live]   List candidates in your league (live peers if any)
+vibedating discover [--live]  Find live same-league peers over the DHT (opt-in)
 vibedating open [--port N]    Serve the local web app (default: random free port)
 vibedating mcp                Run the stdio MCP server (tools: profile, matches)
 vibedating --version
 vibedating --help
 ```
+
+### Live P2P discovery (opt-in)
+
+`vibedating discover --live` joins the public [hyperswarm](https://github.com/holepunchto/hyperswarm)
+DHT on your league topic — `sha256('vibedate:' + leagueBucket)` — so same-league
+peers find each other with **no central server**. On each encrypted connection
+the two sides exchange a one-line hello with exactly
+`{ handle, league, harness }`; raw usage is never put on the wire. Discovered
+peers are stored in `~/.vibedating/peers.json` and shown by `vibedating matches`.
+
+Live discovery is **off by default**. The `--live` flag is the explicit opt-in
+(persisted as the `share:live` consent scope); every live run prints what it
+shares before joining. `Ctrl+C` leaves the swarm cleanly.
 
 ## Three faces, one local engine
 
@@ -89,9 +107,13 @@ const who = matches(lg.name, CANDIDATES);         // same/adjacent-tier candidat
 - **Raw usage stays local.** `totalTokens` is read into memory, stored at
   `~/.vibedating/state.json`, and shown in the web app only behind an opt-in
   toggle. It is never transmitted.
-- **Only the league bucket is shared** (and in v0, only with the local demo pool).
+- **Only the league bucket is shared** — with the local demo pool, and (only if
+  you opt in with `--live`) as `{ handle, league, harness }` with same-league
+  peers over the hyperswarm DHT. The handshake parser whitelists those three
+  fields, so a peer can't even be *sent* anything else into your process.
 - Consent for sharing the league is modeled with `@pooriaarab/vibe-core`'s consent
   ledger (scope `share:league`), granted on `connect` and revocable on reset.
+  Live P2P discovery has its own scope (`share:live`), default **off**.
 
 ## Leagues & matching
 
