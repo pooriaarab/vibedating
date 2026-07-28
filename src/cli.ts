@@ -70,7 +70,7 @@ import { createLiveBridge, createRoomBridge, startServer, type LiveBridge, type 
 import { runMcp } from './mcp.js';
 
 /** Mirrors package.json version (kept here; package.json imports are brittle under bundling). */
-const VERSION = '0.8.0';
+const VERSION = '0.8.1';
 
 /** Recognized top-level commands, plus the synthetic help/version. */
 export type Command =
@@ -664,6 +664,17 @@ export function shouldKeepAlive(flag: boolean, stdinIsTTY: boolean | undefined):
   return flag || stdinIsTTY !== true;
 }
 
+export function parseSendCommand(text: string): { path: string } | { error: 'missing_path' } | null {
+  const parts = text.split(' ');
+  const cmd = parts[0];
+  if (cmd === '/send' || cmd === '/file' || cmd === '/image') {
+    const path = text.slice(cmd.length).trim();
+    if (!path) return { error: 'missing_path' };
+    return { path };
+  }
+  return null;
+}
+
 /**
  * `vibedating live --via-relay [--to @handle]` — chat over the Nostr-relay
  * FALLBACK when direct hyperdht hole-punching fails (symmetric NATs). v0 is
@@ -874,6 +885,14 @@ async function cmdLive(
       if (target !== null) {
         process.stdout.write(`  ★ found ${sanitizePeerText(link.hello.handle)} — auto-opening\n`);
       }
+      // Bind media receipt ONCE per link (not in onMatch) — same discipline as
+      // onMessage: no handler accumulation, no drops. A received file is notable
+      // from any peer. AEGIS-lite: name is untrusted display data.
+      link.onMedia((m) => {
+        process.stdout.write(
+          `  📎 <${sanitizePeerText(link.hello.handle)}> sent ${sanitizePeerText(m.name)} — saved to ${m.path}\n`,
+        );
+      });
       pairing.add(link);
     },
   });
@@ -881,7 +900,7 @@ async function cmdLive(
     `  topic: ${TOPIC_PREFIX}${profile.league} → ${session.topic.toString('hex').slice(0, 12)}…` +
       `${topics.length > 1 ? ` (+${topics.length - 1} more)` : ''}\n`,
   );
-  process.stdout.write('  type to chat · /next · /open <handle> · /quit\n');
+  process.stdout.write('  type to chat · /send <path> · /next · /open <handle> · /quit\n');
   process.stdout.write('  video chat: live A/V runs in the web app — run `vibedating open`\n\n');
 
   // Read stdin line by line; slash-commands drive the pairing policy.
@@ -907,6 +926,26 @@ async function cmdLive(
       const handle = text.slice('/open '.length).trim();
       if (pairing.open(handle) === undefined) {
         process.stdout.write(`  · no available peer "${handle}"\n`);
+      }
+      continue;
+    }
+    const sendRes = parseSendCommand(text);
+    if (sendRes !== null) {
+      if ('error' in sendRes) {
+        process.stdout.write('  usage: /send <path>\n');
+        continue;
+      }
+      const cur = pairing.current();
+      if (cur === undefined) {
+        process.stdout.write('  · no peer yet — waiting for a match…\n');
+        continue;
+      }
+      try {
+        process.stdout.write(`  📎 sending ${sendRes.path}…\n`);
+        await cur.sendMedia(sendRes.path);
+        process.stdout.write('  ✓ sent\n');
+      } catch (err) {
+        process.stdout.write(`  ✗ failed to send media: ${err instanceof Error ? err.message : String(err)}\n`);
       }
       continue;
     }

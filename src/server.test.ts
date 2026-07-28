@@ -69,11 +69,15 @@ function fakeBridge(seedPeers: readonly LivePeerInfo[] = []): LiveBridge & {
   queue: Map<string, RtcFrame[]>;
   sentMessages: Array<{ handle: string; text: string }>;
   msgQueue: Map<string, LiveMessage[]>;
+  sentMedia: Array<{ handle: string; path: string }>;
+  mediaQueue: Map<string, { name: string; mime: string; dataB64: string }[]>;
 } {
   const sent: Array<{ handle: string; frame: RtcFrame }> = [];
   const queue = new Map<string, RtcFrame[]>();
   const sentMessages: Array<{ handle: string; text: string }> = [];
   const msgQueue = new Map<string, LiveMessage[]>();
+  const sentMedia: Array<{ handle: string; path: string }> = [];
+  const mediaQueue = new Map<string, { name: string; mime: string; dataB64: string }[]>();
   const peers: LivePeerInfo[] = [...seedPeers];
   return {
     peers,
@@ -96,10 +100,20 @@ function fakeBridge(seedPeers: readonly LivePeerInfo[] = []): LiveBridge & {
       if (q.length > 0) return q.shift() ?? null;
       return null; // never block in tests
     },
+    async sendMedia(handle, path) {
+      sentMedia.push({ handle, path });
+    },
+    async pollMedia(_handle) {
+      const q = mediaQueue.get(_handle) ?? [];
+      if (q.length > 0) return q.shift() ?? null;
+      return null;
+    },
     sent,
     queue,
     sentMessages,
     msgQueue,
+    sentMedia,
+    mediaQueue,
   };
 }
 
@@ -296,6 +310,7 @@ describe('live A/V signaling bridge (/api/live/peers, /live/signal)', () => {
       },
       onSignal() {},
       onMessage() {},
+      onMedia() {},
       onClose() {},
     } as unknown as PeerLink;
     bridge.addLink(fakeLink);
@@ -533,6 +548,55 @@ describe('live text chat bridge (/live/message)', () => {
     });
   });
 
+  describe('live media bridge (/live/media)', () => {
+    function postMedia(url: string, body: unknown): Promise<Response> {
+      return fetch(`${url}/live/media`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+    }
+
+    it('POST /live/media relays valid media files', async () => {
+      const bridge = fakeBridge();
+      await withServer(
+        async ({ url }) => {
+          const res = await postMedia(url, {
+            handle: '@alice',
+            name: 'image.png',
+            mime: 'image/png',
+            dataB64: Buffer.from('fake-png-data').toString('base64'),
+          });
+          expect(res.status).toBe(200);
+          expect((await res.json()) as { ok: boolean }).toStrictEqual({ ok: true });
+          expect(bridge.sentMedia).toHaveLength(1);
+          expect(bridge.sentMedia[0]?.handle).toBe('@alice');
+          expect(bridge.sentMedia[0]?.path).toMatch(/vibe-media-send/);
+        },
+        { live: bridge },
+      );
+    });
+
+    it('GET /live/media long-poll returns a queued media, then null when empty', async () => {
+      const bridge = fakeBridge();
+      bridge.mediaQueue.set('@alice', [{ name: 'img.png', mime: 'image/png', dataB64: 'fakedata' }]);
+      await withServer(
+        async ({ url }) => {
+          const r1 = await fetch(`${url}/live/media?handle=${encodeURIComponent('@alice')}`);
+          expect(r1.status).toBe(200);
+          expect((await r1.json()) as { media: unknown | null }).toStrictEqual({
+            media: { name: 'img.png', mime: 'image/png', dataB64: 'fakedata' },
+          });
+          const r2 = await fetch(`${url}/live/media?handle=${encodeURIComponent('@alice')}`);
+          expect((await r2.json()) as { media: unknown | null }).toStrictEqual({
+            media: null,
+          });
+        },
+        { live: bridge },
+      );
+    });
+  });
+
   it('createLiveBridge queues incoming messages per peer, caps the backlog, and sends via link.send', async () => {
     const bridge = createLiveBridge();
     let msgCb: ((m: LiveMessage) => void) | undefined;
@@ -544,6 +608,7 @@ describe('live text chat bridge (/live/message)', () => {
       onMessage(cb: (m: LiveMessage) => void) {
         msgCb = cb;
       },
+      onMedia() {},
       send(t: string) {
         sentTexts.push(t);
       },
