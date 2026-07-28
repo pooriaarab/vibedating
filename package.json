@@ -1,6 +1,6 @@
 {
   "name": "vibedate",
-  "version": "0.3.1",
+  "version": "0.4.0",
   "description": "Dating by tokens — matched by usage league across agentic CLIs. Raw usage stays local; only your league is shared. CLI + local web app + MCP. Local-first.",
   "type": "module",
   "license": "MIT",
@@ -29,7 +29,7 @@
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.0.0",
-    "@pooriaarab/vibe-core": "^0.2.0",
+    "@pooriaarab/vibe-core": "^0.3.0",
     "hyperswarm": "^4.17.0"
   },
   "devDependencies": {

@@ -7,7 +7,13 @@
  *
  * Builds on `@pooriaarab/vibe-core` (UsageSnapshot / Harness / consent ledger).
  */
-import type { Harness, UsageSnapshot } from '@pooriaarab/vibe-core';
+import { readHarnessUsage } from '@pooriaarab/vibe-core';
+import type {
+  Harness,
+  HarnessUsageOptions,
+  UsageSnapshot,
+  UsageSource,
+} from '@pooriaarab/vibe-core';
 
 /**
  * A usage league (volume bucket). `max` is inclusive; the top tier is open-ended
@@ -112,46 +118,54 @@ export const DEMO_TOTAL_TOKENS = 23_400_000;
 const MS_PER_DAY = 86_400_000;
 
 /**
- * v0 usage reader. Resolution order:
- *
- *   1. (future) read-only OAuth → `verified: true`. **NOT implemented in v0** —
- *      see {@link tryReadVerifiedUsage}. This arm is the deliberate seam.
- *   2. a self-reported value from the {@link TOKENS_ENV} env var → `verified: false`.
- *   3. the demo value {@link DEMO_TOTAL_TOKENS} → `verified: false`.
- *
- * The snapshot's `totalTokens` is the only thing that must never leave the
- * machine; everything downstream consumes only the league bucket.
+ * A usage snapshot with honest provenance. `source` says where `totalTokens`
+ * came from; `verified` is true ONLY for `source === 'real'` (measured from
+ * the harness's own local session logs). The token total is the one thing that
+ * must never leave the machine; everything downstream consumes only the league
+ * bucket plus the verified flag.
  */
-export async function readUsage(harness: Harness = 'claude-code'): Promise<UsageSnapshot> {
-  // ── Seam: read-only OAuth (verified:true). Land here once a provider exposes a
-  // read-only usage scope. Intentionally unimplemented in v0 so the rest of the
-  // product builds against a stable UsageSnapshot today. ──────────────────────
-  const verified = await tryReadVerifiedUsage(harness);
-  if (verified) return verified;
-
-  // ── Self-reported (verified:false): env var, else demo default. ────────────
-  const injected = parseTokensEnv(process.env[TOKENS_ENV]);
-  const totalTokens = injected ?? DEMO_TOTAL_TOKENS;
-  const now = new Date();
-  return {
-    harness,
-    totalTokens,
-    verified: false,
-    windowStart: new Date(now.getTime() - 30 * MS_PER_DAY).toISOString(),
-    windowEnd: now.toISOString(),
-  };
+export interface LocalUsageSnapshot extends UsageSnapshot {
+  /** Where the total came from: measured locally, self-reported, or demo. */
+  readonly source: UsageSource;
+  /** Short human-facing provenance note from the reader (local display only). */
+  readonly detail?: string;
 }
 
 /**
- * Future home of read-only OAuth verification. Returns `null` in v0.
+ * Usage reader, backed by vibe-core's {@link readHarnessUsage}. Resolution order:
  *
- * Implementing this (reading a real, provider-attested usage scope) flips the
- * snapshot to `verified: true` and is what makes the league trustworthy. Kept as
- * an explicit, named seam rather than a TODO comment so the privacy contract is
- * visible at the call site.
+ *   1. a self-reported value — explicit `opts.selfReportTokens`, or the
+ *      {@link TOKENS_ENV} env var (suffix-friendly: `12M`, `1.2B`), or vibe-core's
+ *      own `VIBE_TOKENS` env → `source: 'self-report'` → `verified: false`.
+ *   2. the harness's REAL local session logs (claude-code / codex / gemini / pi /
+ *      kimi), read from disk by vibe-core → `source: 'real'` → `verified: true`.
+ *   3. the demo value {@link DEMO_TOTAL_TOKENS} → `source: 'demo'` →
+ *      `verified: false`.
+ *
+ * The demo arm keeps vibedating's own demo total (10M league, non-empty demo
+ * pool) rather than vibe-core's smaller placeholder, so demo behavior is
+ * unchanged. Raw usage never leaves the machine.
  */
-export async function tryReadVerifiedUsage(_harness: Harness): Promise<UsageSnapshot | null> {
-  return null;
+export async function readUsage(
+  harness: Harness = 'claude-code',
+  opts: HarnessUsageOptions = {},
+): Promise<LocalUsageSnapshot> {
+  const merged: HarnessUsageOptions = { ...opts };
+  if (merged.selfReportTokens === undefined) {
+    const injected = parseTokensEnv(process.env[TOKENS_ENV]);
+    if (injected !== undefined) merged.selfReportTokens = injected;
+  }
+  const result = await readHarnessUsage(harness, merged);
+  const now = new Date();
+  return {
+    harness,
+    totalTokens: result.source === 'demo' ? DEMO_TOTAL_TOKENS : result.totalTokens,
+    verified: result.source === 'real',
+    source: result.source,
+    ...(result.detail !== undefined ? { detail: result.detail } : {}),
+    windowStart: new Date(now.getTime() - 30 * MS_PER_DAY).toISOString(),
+    windowEnd: now.toISOString(),
+  };
 }
 
 const TOKEN_MULT: Record<string, number> = {
@@ -266,7 +280,7 @@ export function matches(
 
 /* Re-export the vibe-core primitives this product is built on, for convenience. */
 export { createConsentLedger } from '@pooriaarab/vibe-core';
-export type { Harness, UsageSnapshot } from '@pooriaarab/vibe-core';
+export type { Harness, UsageSnapshot, UsageSource } from '@pooriaarab/vibe-core';
 
 /* Live P2P matching (hyperswarm DHT). Consent-gated; raw usage never leaves. */
 export {
@@ -275,8 +289,19 @@ export {
   loadPeers,
   parseHandshake,
   recordPeer,
+  recordPeerMessage,
   serializeHandshake,
   startDiscovery,
   TOPIC_PREFIX,
 } from './p2p.js';
 export type { DiscoveryOptions, DiscoverySession, PeerHello, StoredPeer } from './p2p.js';
+
+/* Persistent ed25519 identity: signs hellos so a handle can't be impersonated. */
+export {
+  canonicalHelloClaims,
+  classifyHelloIdentity,
+  loadOrCreateIdentity,
+  signHelloClaims,
+  verifyHelloClaims,
+} from './identity.js';
+export type { HelloClaims, Identity, IdentityProof, IdentityVerdict } from './identity.js';
