@@ -296,12 +296,34 @@ export {
 } from './p2p.js';
 export type { DiscoveryOptions, DiscoverySession, PeerHello, StoredPeer } from './p2p.js';
 
+/* Nostr-relay FALLBACK transport: e2e-encrypted chat (NIP-04) over public relays
+   when direct hyperdht hole-punching fails between NAT-blocked peers. The relay
+   stores only ciphertext; a separate secp256k1 Nostr key (see loadOrCreateNostrKey)
+   is used for NIP-04, never the ed25519 identity. nostr-tools loads lazily on
+   first relay use, so non-relay commands never pay for it. */
+export {
+  conversationTag,
+  createNostrPoolTransport,
+  createNostrRelayLink,
+  DEFAULT_RELAYS,
+  VIBEDATE_MESSAGE_KIND,
+  VIBEDATE_PRESENCE_KIND,
+} from './relay.js';
+export type {
+  CreateNostrRelayLinkOptions,
+  NostrRelayLink,
+  RelayEvent,
+  RelayFilter,
+  RelayTransport,
+} from './relay.js';
+
 /* Persistent ed25519 identity: signs hellos so a handle can't be impersonated. */
 export {
   canonicalHelloClaims,
   classifyHelloIdentity,
   loadOrCreateIdentity,
+  loadOrCreateNostrKey,
   signHelloClaims,
   verifyHelloClaims,
 } from './identity.js';
-export type { HelloClaims, Identity, IdentityProof, IdentityVerdict } from './identity.js';
+export type { HelloClaims, Identity, IdentityProof, IdentityVerdict, NostrKey } from './identity.js';
