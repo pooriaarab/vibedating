@@ -416,6 +416,15 @@ export async function startDiscovery(opts: DiscoveryOptions): Promise<DiscoveryS
             ? { pubkey: frame.pubkey, identityVerified: true }
             : {}),
         };
+        // Self-filter: you can't match yourself. Drop a peer presenting your own
+        // identity pubkey (e.g. two of your own instances on one topic), or —
+        // when neither side has a pubkey (legacy peers) — your own handle.
+        if (
+          (peer.pubkey !== undefined && peer.pubkey === hello.pubkey) ||
+          (peer.pubkey === undefined && hello.pubkey === undefined && peer.handle === hello.handle)
+        ) {
+          continue;
+        }
         // The joined topic(s) scope which peers can reach us, but a peer could
         // still arrive on a shared topic advertising a league we don't accept
         // — drop it. `acceptLeague` defaults to EXACT own-league match, so the
