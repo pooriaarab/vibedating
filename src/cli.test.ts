@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { parseArgs, shouldKeepAlive } from './cli.js';
+import { formatAgo, parseArgs, shouldKeepAlive } from './cli.js';
 
 describe('parseArgs — commands', () => {
   it('recognizes each subcommand', () => {
@@ -309,5 +309,21 @@ describe('shouldKeepAlive() — the EOF policy', () => {
     expect(shouldKeepAlive(false, undefined)).toBe(true);
     expect(shouldKeepAlive(false, false)).toBe(true);
     expect(shouldKeepAlive(true, undefined)).toBe(true);
+  });
+});
+
+describe('formatAgo() — lastMessageAt display', () => {
+  const now = new Date('2026-07-28T12:00:00.000Z');
+
+  it('renders the compact buckets', () => {
+    expect(formatAgo('2026-07-28T11:59:40.000Z', now)).toBe('just now'); // 20s
+    expect(formatAgo('2026-07-28T11:55:00.000Z', now)).toBe('5m ago');
+    expect(formatAgo('2026-07-28T09:00:00.000Z', now)).toBe('3h ago');
+    expect(formatAgo('2026-07-26T12:00:00.000Z', now)).toBe('2d ago');
+  });
+
+  it('clamps future timestamps and survives garbage input', () => {
+    expect(formatAgo('2026-07-28T13:00:00.000Z', now)).toBe('just now');
+    expect(formatAgo('not a date', now)).toBe('unknown');
   });
 });
