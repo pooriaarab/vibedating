@@ -9,16 +9,20 @@ import type { PeerLink } from './link.js';
  */
 interface FakeLink extends PeerLink {
   fireRemoteClose(): void;
+  fireMessage(text: string): void;
 }
 
 function fakeLink(handle: string): FakeLink {
   let closeCb: (() => void) | undefined;
+  let msgCb: ((m: { id: string; text: string; at: number }) => void) | undefined;
   return {
     hello: { handle, league: '10M', harness: 'fake' },
     send: vi.fn(),
     sendMedia: vi.fn().mockResolvedValue({ id: '', size: 0 }),
     sendSignal: vi.fn(),
-    onMessage: vi.fn(),
+    onMessage: (cb) => {
+      msgCb = cb;
+    },
     onMedia: vi.fn(),
     onSignal: vi.fn(),
     onClose: (cb: () => void) => {
@@ -26,6 +30,7 @@ function fakeLink(handle: string): FakeLink {
     },
     close: vi.fn(),
     fireRemoteClose: () => closeCb?.(),
+    fireMessage: (text: string) => msgCb?.({ id: text, text, at: 1 }),
   };
 }
 
@@ -160,5 +165,43 @@ describe('LivePairing — remote hang-up handling', () => {
 
     expect(pairing.current()).toBe(a); // unchanged
     expect(pairing.available).toBe(0);
+  });
+});
+
+describe('LivePairing — message routing (bind once, buffer non-current)', () => {
+  it('buffers a non-current peer message instead of dropping it, flushes on select', () => {
+    const pairing = createPairing();
+    const delivered: Array<[string, string]> = [];
+    const queued: Array<[string, number]> = [];
+    pairing.onMessage((from, m) => delivered.push([from, m.text]));
+    pairing.onQueued((from, n) => queued.push([from, n]));
+
+    const alice = fakeLink('@alice');
+    const bob = fakeLink('@bob');
+    pairing.add(alice); // auto-paired → current
+    pairing.add(bob); // queued
+
+    alice.fireMessage('hi from alice'); // current → delivered live
+    bob.fireMessage('hi from bob'); // non-current → BUFFERED, not dropped
+
+    expect(delivered).toEqual([['@alice', 'hi from alice']]);
+    expect(queued).toEqual([['@bob', 1]]);
+
+    pairing.open('@bob'); // select bob → flush his buffer
+    expect(delivered).toEqual([
+      ['@alice', 'hi from alice'],
+      ['@bob', 'hi from bob'], // flushed on select, never lost
+    ]);
+  });
+
+  it('delivers a current-peer message exactly once (onMessage bound once per link)', () => {
+    const pairing = createPairing();
+    const delivered: string[] = [];
+    pairing.onMessage((_from, m) => delivered.push(m.text));
+    const alice = fakeLink('@alice');
+    pairing.add(alice);
+    alice.fireMessage('one');
+    alice.fireMessage('two');
+    expect(delivered).toEqual(['one', 'two']); // once each — no duplication
   });
 });
