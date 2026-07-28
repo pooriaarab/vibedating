@@ -39,9 +39,11 @@ import { loadOrCreateIdentity, signHelloClaims } from './identity.js';
 import { ensureHandle } from './handlegen.js';
 import {
   daemonStatus,
+  installDaemonService,
   removeDaemonState,
   startDaemon,
   stopDaemon,
+  uninstallDaemonService,
   writeDaemonState,
 } from './daemon.js';
 import { createPairing } from './pairing.js';
@@ -354,6 +356,7 @@ async function cmdConnect(): Promise<number> {
   // set (env override still wins as a one-off) — never silently ship as @you.
   const ensured = ensureHandle();
   const handle = ensured.handle;
+  const firstConnect = loadProfile() === null;
   const snapshot = await readUsage(harness);
   const profile = connectProfile(snapshot, handle);
   // First connect generates the persistent ed25519 identity (mode 0600); later
@@ -369,7 +372,12 @@ async function cmdConnect(): Promise<number> {
   process.stdout.write(`  verification: ${verificationText(snapshot)}\n`);
   process.stdout.write(`  identity: ed25519 ${identity.publicKeyHex.slice(0, 12)}… — signs your hello (🔑)\n`);
   process.stdout.write('\n');
-  process.stdout.write('  • raw usage stays local · only league shared\n\n');
+  process.stdout.write('  • raw usage stays local · only league shared\n');
+  if (firstConnect) {
+    // Onboarding (opt-in, reversible): offer the notify-on-login daemon once.
+    process.stdout.write('  • optional: get notified of new matches on login — `vibedate daemon install` (undo: daemon uninstall)\n');
+  }
+  process.stdout.write('\n');
   return 0;
 }
 
@@ -959,8 +967,24 @@ async function cmdDaemon(arg: string | undefined, any: boolean): Promise<number>
     }
     case 'run':
       return cmdDaemonRun(any);
+    case 'install': {
+      if (loadProfile() === null) {
+        process.stderr.write('Not connected yet. Run `vibedating connect` first.\n');
+        return 1;
+      }
+      const r = installDaemonService({ any });
+      process.stdout.write(`  ${r.detail}\n`);
+      if (r.servicePath !== null) process.stdout.write(`  service: ${r.servicePath}\n`);
+      if (r.installed) process.stdout.write('  undo anytime: vibedate daemon uninstall\n');
+      return r.installed ? 0 : 1;
+    }
+    case 'uninstall': {
+      const r = uninstallDaemonService({});
+      process.stdout.write(`  ${r.detail}\n`);
+      return 0;
+    }
     default:
-      process.stderr.write('usage: vibedating daemon [start|stop|status] [--any]\n');
+      process.stderr.write('usage: vibedating daemon [start|stop|status|install|uninstall] [--any]\n');
       return 1;
   }
 }
@@ -980,8 +1004,11 @@ Usage:
   vibedating block <@handle>    Block a handle — their hello is dropped (never recorded/paired)
   vibedating unblock <@handle>  Remove a handle from the blocklist
   vibedating blocklist          List blocked handles
-  vibedating daemon [start|stop|status] [--any]  Manage the notify-only background
-                                daemon — alerts on NEW matches, never opens chat/video
+  vibedating daemon [start|stop|status|install|uninstall] [--any]
+                                Manage the notify-only background daemon — alerts on
+                                NEW matches, never opens chat/video. install adds a
+                                login service (launchd on macOS, systemd on Linux);
+                                uninstall removes it.
   vibedating open [--port N] [--any]  Serve the local web app (default: random port)
                                 + live video + chat with connected peers
                                 (your league + adjacent; --any = every league)
