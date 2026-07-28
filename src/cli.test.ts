@@ -1,5 +1,24 @@
 import { describe, expect, it } from 'vitest';
-import { formatAgo, parseArgs, shouldKeepAlive } from './cli.js';
+import { formatAgo, parseArgs, parseSendCommand, shouldKeepAlive } from './cli.js';
+
+describe('parseSendCommand()', () => {
+  it('parses valid commands', () => {
+    expect(parseSendCommand('/send /path/to/file.png')).toEqual({ path: '/path/to/file.png' });
+    expect(parseSendCommand('/file /path/to/file.png')).toEqual({ path: '/path/to/file.png' });
+    expect(parseSendCommand('/image /path/to/file.png')).toEqual({ path: '/path/to/file.png' });
+    expect(parseSendCommand('/send   spaced path.jpg ')).toEqual({ path: 'spaced path.jpg' });
+  });
+
+  it('handles missing path', () => {
+    expect(parseSendCommand('/send')).toEqual({ error: 'missing_path' });
+    expect(parseSendCommand('/file  ')).toEqual({ error: 'missing_path' });
+  });
+
+  it('ignores other commands', () => {
+    expect(parseSendCommand('/next')).toBeNull();
+    expect(parseSendCommand('hello')).toBeNull();
+  });
+});
 
 describe('parseArgs — commands', () => {
   it('recognizes each subcommand', () => {
