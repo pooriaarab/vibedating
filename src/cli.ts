@@ -36,11 +36,15 @@ import {
 } from './p2p.js';
 import { createPairing } from './pairing.js';
 import {
+  addBlock,
   canShareLive,
   connectProfile,
   grantLiveConsent,
+  isBlocked,
+  loadBlocklist,
   loadProfile,
   normalizeHandle,
+  removeBlock,
   resolveHandle,
   sameHandle,
   saveHandle,
@@ -60,6 +64,9 @@ export type Command =
   | 'live'
   | 'find'
   | 'handle'
+  | 'block'
+  | 'unblock'
+  | 'blocklist'
   | 'mcp'
   | 'help'
   | 'version'
@@ -172,6 +179,9 @@ export function parseArgs(argv: readonly string[]): ParsedArgs {
       a === 'live' ||
       a === 'find' ||
       a === 'handle' ||
+      a === 'block' ||
+      a === 'unblock' ||
+      a === 'blocklist' ||
       a === 'mcp' ||
       a === 'help'
         ? a
@@ -180,7 +190,7 @@ export function parseArgs(argv: readonly string[]): ParsedArgs {
       out = { ...out, command: known };
     } else if (out.arg === undefined) {
       // First positional after the command → the command's argument
-      // (e.g. `handle @name`, `find @x`).
+      // (e.g. `handle @name`, `find @x`, `block @y`).
       out = { ...out, arg: a };
     }
   }
@@ -214,6 +224,15 @@ function discoveryScope(
     topics: ordered.map(leagueTopic),
     acceptLeague: (peerLeague: string) => accepted.has(peerLeague),
   };
+}
+
+/**
+ * Predicate backed by the persisted blocklist (~/.vibedating/blocklist.json),
+ * injected into {@link startDiscovery} so a blocked peer's hello is DROPPED exactly
+ * like a wrong-league one — never recorded, never notified, never paired.
+ */
+function blockedChecker(): (handle: string) => boolean {
+  return (handle: string) => isBlocked(handle);
 }
 
 /**
@@ -356,6 +375,7 @@ async function cmdDiscover(live: boolean, any: boolean): Promise<number> {
     hello,
     topics,
     acceptLeague,
+    isBlocked: blockedChecker(),
     onPeer: (peer, isNew) => {
       const { bullet, qual } = peerDirection(profile.league, peer.league);
       process.stdout.write(
@@ -415,7 +435,7 @@ async function cmdOpen(port: number | undefined): Promise<number> {
       league: profile.league,
       harness: profile.harness,
     };
-    void startDiscovery({ hello, onLink: (link) => live!.addLink(link) })
+    void startDiscovery({ hello, isBlocked: blockedChecker(), onLink: (link) => live!.addLink(link) })
       .then((s) => {
         session = s;
       })
@@ -506,6 +526,7 @@ async function cmdLive(dating: boolean, any: boolean, to: string | undefined): P
     hello,
     topics,
     acceptLeague,
+    isBlocked: blockedChecker(),
     onLink: (link) => {
       // Targeted (`--to`) mode: only pair the requested handle. Other peers are
       // noted and politely declined (socket closed) so the session waits for the
@@ -620,6 +641,7 @@ async function cmdFind(targetArg: string | undefined, any: boolean): Promise<num
     hello,
     topics,
     acceptLeague,
+    isBlocked: blockedChecker(),
     onPeer: (peer) => {
       const { qual } = peerDirection(profile.league, peer.league);
       if (sameHandle(peer.handle, target)) {
@@ -651,6 +673,64 @@ async function cmdFind(targetArg: string | undefined, any: boolean): Promise<num
   return 0;
 }
 
+/**
+ * `vibedate block <@handle>` — add a handle to the persisted blocklist
+ * (~/.vibedating/blocklist.json). A blocked peer's hello is dropped on arrival
+ * (never recorded, never notified, never paired). Idempotent.
+ */
+async function cmdBlock(arg: string | undefined): Promise<number> {
+  if (arg === undefined || arg.trim() === '') {
+    process.stderr.write('usage: vibedating block <@handle>\n');
+    return 1;
+  }
+  const canonical = normalizeHandle(arg);
+  if (canonical === null) {
+    process.stderr.write(`invalid handle: ${arg}\n`);
+    return 1;
+  }
+  const { blocked, changed } = addBlock(canonical);
+  process.stdout.write(
+    changed
+      ? `  blocked ${canonical} (saved to ~/.vibedating/blocklist.json)\n`
+      : `  ${canonical} is already blocked\n`,
+  );
+  process.stdout.write(`  ${blocked.length} handle${blocked.length === 1 ? '' : 's'} blocked\n`);
+  return 0;
+}
+
+/** `vibedate unblock <@handle>` — remove a handle from the blocklist. Idempotent. */
+async function cmdUnblock(arg: string | undefined): Promise<number> {
+  if (arg === undefined || arg.trim() === '') {
+    process.stderr.write('usage: vibedating unblock <@handle>\n');
+    return 1;
+  }
+  const canonical = normalizeHandle(arg);
+  if (canonical === null) {
+    process.stderr.write(`invalid handle: ${arg}\n`);
+    return 1;
+  }
+  const { blocked, changed } = removeBlock(canonical);
+  process.stdout.write(
+    changed
+      ? `  unblocked ${canonical}\n`
+      : `  ${canonical} was not blocked\n`,
+  );
+  process.stdout.write(`  ${blocked.length} handle${blocked.length === 1 ? '' : 's'} blocked\n`);
+  return 0;
+}
+
+/** `vibedate blocklist` — print the persisted blocklist. */
+async function cmdBlocklist(): Promise<number> {
+  const blocked = loadBlocklist();
+  if (blocked.length === 0) {
+    process.stdout.write('  (blocklist is empty)\n');
+    return 0;
+  }
+  process.stdout.write(`  ${blocked.length} blocked handle${blocked.length === 1 ? '' : 's'}:\n`);
+  for (const h of blocked) process.stdout.write(`  ${h}\n`);
+  return 0;
+}
+
 const HELP = `vibedating ${VERSION} — dating by tokens (local-first)
 
 Usage:
@@ -660,6 +740,9 @@ Usage:
   vibedating live [--dating] [--any] [--to @handle]  Live chat (your league + adjacent; --any = everyone; /next or --dating pick; --to targets one peer)
   vibedating find <@handle> [--any]  Search the DHT for one specific handle (★ highlights a match)
   vibedating handle [@name]     Print or set your handle (persisted; a leading '@' is optional)
+  vibedating block <@handle>    Block a handle — their hello is dropped (never recorded/paired)
+  vibedating unblock <@handle>  Remove a handle from the blocklist
+  vibedating blocklist          List blocked handles
   vibedating open [--port N]    Serve the local web app (default: random port)
                                 + live A/V video with connected same-league peers
   vibedating mcp                Run the stdio MCP server (profile, matches)
@@ -696,6 +779,12 @@ async function main(argv: readonly string[]): Promise<number> {
       return cmdConnect();
     case 'handle':
       return cmdHandle(parsed.arg);
+    case 'block':
+      return cmdBlock(parsed.arg);
+    case 'unblock':
+      return cmdUnblock(parsed.arg);
+    case 'blocklist':
+      return cmdBlocklist();
     case 'matches':
       return cmdMatches(parsed.live);
     case 'discover':
