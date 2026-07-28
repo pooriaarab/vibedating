@@ -17,10 +17,12 @@ Part of the **Vibe Suite** — companion tools for agentic coding CLIs. Ships as
 
 ## Status
 
-**v0 — works locally, privacy-first.** Verification via read-only OAuth
-(`verified: true`) is the deliberate next step; the seam exists
-([`tryReadVerifiedUsage`](src/index.ts)). For now usage is **self-reported**
-(`verified: false`), read locally or supplied by you.
+**v0 — works locally, privacy-first.** Usage is **verified from your harness's
+real local logs** via vibe-core's `readHarnessUsage` (source `real` →
+`verified: true`); when no logs are readable you can self-report
+(`VIBEDATING_TOKENS`, unverified) or fall back to a demo value (unverified).
+Handles are bound to a persistent ed25519 identity (`~/.vibedating/identity.json`,
+mode 0600): every hello is signed, and a forged signature gets the peer dropped.
 
 ## Install
 
@@ -44,7 +46,7 @@ vibedating connect
 vibedating matches
 
 # 3. (Opt-in) find live same-league peers over the DHT — no server
-vibedating discover --live        # shares ONLY handle + league + harness
+vibedating discover --live        # shares ONLY handle+league+harness+verified flag+identity pubkey
 
 # 4. Open the local web app in your browser (served from your machine)
 vibedating open
@@ -73,8 +75,10 @@ vibedating --help
 `vibedating discover --live` joins the public [hyperswarm](https://github.com/holepunchto/hyperswarm)
 DHT on your league topic — `sha256('vibedate:' + leagueBucket)` — so same-league
 peers find each other with **no central server**. On each encrypted connection
-the two sides exchange a one-line hello with exactly
-`{ handle, league, harness }`; raw usage is never put on the wire. Discovered
+the two sides exchange a one-line hello with only
+`{ handle, league, harness, verified, pubkey, nonce, sig }` — the proof fields
+sign the hello with your persistent ed25519 identity so a handle can't be
+impersonated; raw usage is never put on the wire. Discovered
 peers are stored in `~/.vibedating/peers.json` and shown by `vibedating matches`.
 
 Live discovery is **off by default**. The `--live` flag is the explicit opt-in
@@ -108,9 +112,11 @@ const who = matches(lg.name, CANDIDATES);         // same/adjacent-tier candidat
   `~/.vibedating/state.json`, and shown in the web app only behind an opt-in
   toggle. It is never transmitted.
 - **Only the league bucket is shared** — with the local demo pool, and (only if
-  you opt in with `--live`) as `{ handle, league, harness }` with same-league
-  peers over the hyperswarm DHT. The handshake parser whitelists those three
-  fields, so a peer can't even be *sent* anything else into your process.
+  you opt in with `--live`) as `{ handle, league, harness, verified, pubkey,
+  nonce, sig }` with same-league peers over the hyperswarm DHT. The handshake
+  parser whitelists those fields, so a peer can't even be *sent* anything else
+  into your process; the `verified` flag and identity pubkey are the only
+  additions, never a token count.
 - Consent for sharing the league is modeled with `@pooriaarab/vibe-core`'s consent
   ledger (scope `share:league`), granted on `connect` and revocable on reset.
   Live P2P discovery has its own scope (`share:live`), default **off**.

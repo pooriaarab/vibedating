@@ -289,8 +289,19 @@ export {
   loadPeers,
   parseHandshake,
   recordPeer,
+  recordPeerMessage,
   serializeHandshake,
   startDiscovery,
   TOPIC_PREFIX,
 } from './p2p.js';
 export type { DiscoveryOptions, DiscoverySession, PeerHello, StoredPeer } from './p2p.js';
+
+/* Persistent ed25519 identity: signs hellos so a handle can't be impersonated. */
+export {
+  canonicalHelloClaims,
+  classifyHelloIdentity,
+  loadOrCreateIdentity,
+  signHelloClaims,
+  verifyHelloClaims,
+} from './identity.js';
+export type { HelloClaims, Identity, IdentityProof, IdentityVerdict } from './identity.js';
