@@ -70,7 +70,7 @@ import { createLiveBridge, createRoomBridge, startServer, type LiveBridge, type 
 import { runMcp } from './mcp.js';
 
 /** Mirrors package.json version (kept here; package.json imports are brittle under bundling). */
-const VERSION = '0.7.1';
+const VERSION = '0.7.2';
 
 /** Recognized top-level commands, plus the synthetic help/version. */
 export type Command =
@@ -726,10 +726,15 @@ async function cmdLiveViaRelay(profile: ProfileState, to: string | undefined): P
     process.stdout.write(
       `  · relayed to ${sanitizePeerText(l.hello.handle)} (${l.hello.league}${qual} · ${l.hello.harness}) ${usageMark(l.hello)}${idMark(l.hello)}\n`,
     );
-    l.onMessage((m) => {
-      // AEGIS-lite: chat text is UNTRUSTED display data — sanitized before print.
-      process.stdout.write(`  <${sanitizePeerText(l.hello.handle)}> ${sanitizePeerText(m.text)}\n`);
-    });
+  });
+  pairing.onMessage((from, m) => {
+    // AEGIS-lite: chat text is UNTRUSTED display data — sanitized before print.
+    process.stdout.write(`  <${sanitizePeerText(from)}> ${sanitizePeerText(m.text)}\n`);
+  });
+  pairing.onQueued((from, n) => {
+    process.stdout.write(
+      `  · ${sanitizePeerText(from)} sent a message (${n} queued) — /open ${sanitizePeerText(from)} to read\n`,
+    );
   });
   pairing.add(link);
 
@@ -836,11 +841,16 @@ async function cmdLive(
     process.stdout.write(
       `  · matched ${sanitizePeerText(link.hello.handle)} (${link.hello.league}${qual} · ${link.hello.harness}) ${usageMark(link.hello)}${idMark(link.hello)}\n`,
     );
-    link.onMessage((m) => {
-      // AEGIS-lite: chat text is UNTRUSTED display data — never executed, never
-      // passed to a shell/agent; control/bidi chars stripped before printing.
-      process.stdout.write(`  <${sanitizePeerText(link.hello.handle)}> ${sanitizePeerText(m.text)}\n`);
-    });
+  });
+  pairing.onMessage((from, m) => {
+    // AEGIS-lite: chat text is UNTRUSTED display data — never executed, never
+    // passed to a shell/agent; control/bidi chars stripped before printing.
+    process.stdout.write(`  <${sanitizePeerText(from)}> ${sanitizePeerText(m.text)}\n`);
+  });
+  pairing.onQueued((from, n) => {
+    process.stdout.write(
+      `  · ${sanitizePeerText(from)} sent a message (${n} queued) — /open ${sanitizePeerText(from)} to read\n`,
+    );
   });
 
   const { topics, acceptLeague } = discoveryScope(profile.league, any);
