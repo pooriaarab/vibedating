@@ -181,19 +181,21 @@ function peersPath(dir: string): string {
 }
 
 /** Load persisted live peers, or `[]` if none/corrupt. Local-only data. */
-export function loadPeers(dir: string = defaultStateDir()): StoredPeer[] {
+export function loadPeers(dir: string = defaultStateDir(), maxAgeMs: number = 7 * 24 * 60 * 60 * 1000): StoredPeer[] {
   try {
     const raw = readFileSync(peersPath(dir), 'utf8');
     const data = JSON.parse(raw) as { peers?: StoredPeer[] };
-    return Array.isArray(data.peers) ? data.peers : [];
+    if (!Array.isArray(data.peers)) return [];
+    const now = Date.now();
+    return data.peers.filter((p) => now - new Date(p.lastSeenAt).getTime() <= maxAgeMs);
   } catch {
     return [];
   }
 }
 
 /**
- * Record a successfully handshaken peer, keyed by handle (a peer may reconnect
- * from a different key). Returns whether this handle is NEW (first time seen).
+ * Record a successfully handshaken peer, keyed by pubkey (if verified) or handle (legacy).
+ * Returns whether this peer is NEW (first time seen).
  */
 export function recordPeer(
   hello: PeerHello,
@@ -214,7 +216,11 @@ export function recordPeer(
     ...(hello.pubkey !== undefined ? { pubkey: hello.pubkey } : {}),
     ...(hello.identityVerified !== undefined ? { identityVerified: hello.identityVerified } : {}),
   };
-  const existing = peers.findIndex((p) => p.handle === clean.handle);
+  const existing = peers.findIndex((p) =>
+    clean.pubkey !== undefined && p.pubkey !== undefined
+      ? p.pubkey === clean.pubkey
+      : p.handle === clean.handle
+  );
   let isNew: boolean;
   let peer: StoredPeer;
   if (existing >= 0) {
@@ -244,13 +250,17 @@ export function recordPeer(
  * a known peer. Never throws — best-effort bookkeeping.
  */
 export function recordPeerMessage(
-  handle: string,
+  peer: PeerHello,
   dir: string = defaultStateDir(),
   now: Date = new Date(),
 ): boolean {
   try {
     const peers = loadPeers(dir);
-    const idx = peers.findIndex((p) => p.handle === handle);
+    const idx = peers.findIndex((p) =>
+      peer.pubkey !== undefined && p.pubkey !== undefined
+        ? p.pubkey === peer.pubkey
+        : p.handle === peer.handle
+    );
     if (idx < 0) return false;
     peers[idx] = { ...peers[idx]!, lastMessageAt: now.toISOString() };
     mkdirSync(dir, { recursive: true });
@@ -467,7 +477,7 @@ export async function startDiscovery(opts: DiscoveryOptions): Promise<DiscoveryS
           // Local metadata: every incoming msg stamps lastMessageAt on the
           // persisted peer. Best-effort; never affects the link.
           link.onMessage(() => {
-            recordPeerMessage(peer.handle, stateDir);
+            recordPeerMessage(peer, stateDir);
           });
           onLink(link);
         }

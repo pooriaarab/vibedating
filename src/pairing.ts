@@ -178,6 +178,24 @@ export function createPairing(): LivePairing {
       return current;
     },
     add(link: PeerLink): void {
+      // Dedupe by identity: if a link from this identity (pubkey, or handle if legacy) already exists, close it.
+      const isSamePeer = (a: PeerLink, b: PeerLink) => {
+        if (a.hello.pubkey !== undefined && b.hello.pubkey !== undefined) {
+          return a.hello.pubkey === b.hello.pubkey;
+        }
+        return a.hello.handle === b.hello.handle;
+      };
+
+      const existingIdx = queue.findIndex((l) => isSamePeer(l, link));
+      if (existingIdx >= 0) {
+        const old = queue.splice(existingIdx, 1)[0]!;
+        old.close();
+      } else if (current !== undefined && isSamePeer(current, link)) {
+        const old = current;
+        current = undefined;
+        old.close();
+      }
+
       watch(link);
       bindMessages(link); // bind ONCE, here — never in onMatch
       if (current === undefined) {
