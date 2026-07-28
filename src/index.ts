@@ -57,6 +57,45 @@ export function leagueIndex(name: string): number {
   return LEAGUES.findIndex((l) => l.name === name);
 }
 
+/**
+ * Every league name on the ladder: {@link BELOW_LEAGUE} first (it sits just
+ * below the 1M tier), then each {@link LEAGUES} name in ascending order.
+ * Pure; returns a fresh array each call.
+ */
+export function allLeagueNames(): string[] {
+  return [BELOW_LEAGUE, ...LEAGUES.map((l) => l.name)];
+}
+
+/**
+ * League names whose index is within ±`width` of `name`'s index on the ladder,
+ * clamped to the array bounds. Ascending (index order), de-duplicated.
+ *
+ * Edge-case decisions:
+ *   - **{@link BELOW_LEAGUE}** is treated as "index -1" — it sits just below the
+ *     1M tier, so `width` extends ONLY upward into the ladder
+ *     (`leaguesWithin('below-1M', 1) → ['below-1M', '1M']`). This mirrors the
+ *     existing `matches()` rule that below-1M is adjacent only to 1M.
+ *   - **Unknown league names** (not in {@link LEAGUES}, not {@link BELOW_LEAGUE})
+ *     return `[]` — we can't place them on the ladder, so they have no
+ *     neighborhood.
+ *   - **Negative width** is clamped to 0 (self only); non-integer width is
+ *     truncated.
+ *   - **Width larger than the ladder** is clamped to the bounds (whole ladder).
+ */
+export function leaguesWithin(name: string, width: number): string[] {
+  const w = Math.max(0, Math.trunc(width));
+  if (name === BELOW_LEAGUE) {
+    return [BELOW_LEAGUE, ...LEAGUES.slice(0, w).map((l) => l.name)];
+  }
+  const center = leagueIndex(name);
+  if (center < 0) return []; // unknown league → no neighborhood
+  const lo = Math.max(0, center - w);
+  const hi = Math.min(LEAGUES.length - 1, center + w);
+  const out: string[] = [];
+  for (let i = lo; i <= hi; i++) out.push(LEAGUES[i]!.name);
+  return out;
+}
+
 /* -------------------------------------------------------------------------- */
 /* Usage reading                                                              */
 /* -------------------------------------------------------------------------- */
