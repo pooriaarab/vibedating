@@ -6,12 +6,15 @@ import type { VibeEvent } from '@pooriaarab/vibe-core';
 import { CANDIDATES } from './index.js';
 import type { RtcFrame } from './frame.js';
 import {
+  createLiveBridge,
   startServer,
   type LiveBridge,
+  type LiveMessage,
   type LivePeerInfo,
   type StartedServer,
   type StartServerOptions,
 } from './server.js';
+import type { PeerLink } from './link.js';
 
 // Hermetic state dir so the test never touches ~/.vibedating.
 const tmpDir = mkdtempSync(path.join(os.tmpdir(), 'vibedating-test-'));
@@ -53,6 +56,47 @@ function postMatch(url: string, handle: string): Promise<Response> {
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ handle }),
   });
+}
+
+/** A fake LiveBridge that records what the server tries to send and lets a
+ *  test pre-queue frames/messages for the long-polls to return. */
+function fakeBridge(seedPeers: readonly LivePeerInfo[] = []): LiveBridge & {
+  sent: Array<{ handle: string; frame: RtcFrame }>;
+  queue: Map<string, RtcFrame[]>;
+  sentMessages: Array<{ handle: string; text: string }>;
+  msgQueue: Map<string, LiveMessage[]>;
+} {
+  const sent: Array<{ handle: string; frame: RtcFrame }> = [];
+  const queue = new Map<string, RtcFrame[]>();
+  const sentMessages: Array<{ handle: string; text: string }> = [];
+  const msgQueue = new Map<string, LiveMessage[]>();
+  const peers: LivePeerInfo[] = [...seedPeers];
+  return {
+    peers,
+    addLink() {
+      /* not exercised here */
+    },
+    sendSignal(handle, frame) {
+      sent.push({ handle, frame });
+    },
+    async pollSignal(_handle) {
+      const q = queue.get(_handle) ?? [];
+      if (q.length > 0) return q.shift() ?? null;
+      return null; // never block in tests
+    },
+    sendMessage(handle, text) {
+      sentMessages.push({ handle, text });
+    },
+    async pollMessage(_handle) {
+      const q = msgQueue.get(_handle) ?? [];
+      if (q.length > 0) return q.shift() ?? null;
+      return null; // never block in tests
+    },
+    sent,
+    queue,
+    sentMessages,
+    msgQueue,
+  };
 }
 
 describe('local web server', () => {
@@ -182,33 +226,6 @@ describe('POST /api/match', () => {
 });
 
 describe('live A/V signaling bridge (/api/live/peers, /live/signal)', () => {
-  /** A fake LiveBridge that records what the server tries to send and lets a
-   *  test pre-queue frames for the long-poll to return. */
-  function fakeBridge(seedPeers: readonly LivePeerInfo[] = []): LiveBridge & {
-    sent: Array<{ handle: string; frame: RtcFrame }>;
-    queue: Map<string, RtcFrame[]>;
-  } {
-    const sent: Array<{ handle: string; frame: RtcFrame }> = [];
-    const queue = new Map<string, RtcFrame[]>();
-    const peers: LivePeerInfo[] = [...seedPeers];
-    return {
-      peers,
-      addLink() {
-        /* not exercised here */
-      },
-      sendSignal(handle, frame) {
-        sent.push({ handle, frame });
-      },
-      async pollSignal(_handle) {
-        const q = queue.get(_handle) ?? [];
-        if (q.length > 0) return q.shift() ?? null;
-        return null; // never block in tests
-      },
-      sent,
-      queue,
-    };
-  }
-
   function postSignal(url: string, body: unknown): Promise<Response> {
     return fetch(`${url}/live/signal`, {
       method: 'POST',
@@ -241,6 +258,46 @@ describe('live A/V signaling bridge (/api/live/peers, /live/signal)', () => {
       },
       { live: bridge },
     );
+  });
+
+  it('GET /api/live/peers carries the verification marks when present', async () => {
+    const bridge = fakeBridge([
+      { handle: '@bob', league: '10M', harness: 'codex', verified: true, identityVerified: true },
+      { handle: '@legacy', league: '5M', harness: 'claude-code' },
+    ]);
+    await withServer(
+      async ({ url }) => {
+        const json = (await (await fetch(`${url}/api/live/peers`)).json()) as {
+          peers: LivePeerInfo[];
+        };
+        expect(json.peers).toEqual([
+          { handle: '@bob', league: '10M', harness: 'codex', verified: true, identityVerified: true },
+          { handle: '@legacy', league: '5M', harness: 'claude-code' },
+        ]);
+      },
+      { live: bridge },
+    );
+  });
+
+  it('createLiveBridge maps each hello to the display shape — marks kept, pubkey dropped', () => {
+    const bridge = createLiveBridge();
+    const fakeLink = {
+      hello: {
+        handle: '@z',
+        league: '5M',
+        harness: 'codex',
+        verified: true,
+        identityVerified: true,
+        pubkey: 'ab'.repeat(32),
+      },
+      onSignal() {},
+      onMessage() {},
+      onClose() {},
+    } as unknown as PeerLink;
+    bridge.addLink(fakeLink);
+    expect(bridge.peers).toEqual([
+      { handle: '@z', league: '5M', harness: 'codex', verified: true, identityVerified: true },
+    ]);
   });
 
   it('POST /live/signal relays a valid rtc-offer to the bridge', async () => {
@@ -345,5 +402,159 @@ describe('live A/V signaling bridge (/api/live/peers, /live/signal)', () => {
       },
       { live: bridge },
     );
+  });
+});
+
+describe('live text chat bridge (/live/message)', () => {
+  function postMessage(url: string, body: unknown): Promise<Response> {
+    return fetch(`${url}/live/message`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+  }
+
+  it('POST /live/message relays valid text — forged id/at/leak keys stripped by construction', async () => {
+    const bridge = fakeBridge();
+    await withServer(
+      async ({ url }) => {
+        const res = await postMessage(url, {
+          handle: '@alice',
+          text: 'hi there',
+          leak: 'raw-usage',
+          id: 'forged',
+          at: 0,
+        });
+        expect(res.status).toBe(200);
+        expect((await res.json()) as { ok: boolean }).toStrictEqual({ ok: true });
+        // Only the text reaches the bridge — the msg frame's id/at are minted
+        // server-side, so a forged id/at/leak on the body can never reach the wire.
+        expect(bridge.sentMessages).toEqual([{ handle: '@alice', text: 'hi there' }]);
+      },
+      { live: bridge },
+    );
+  });
+
+  it('POST /live/message 400s on empty / oversized / non-string / missing text and does NOT relay', async () => {
+    const bridge = fakeBridge();
+    await withServer(
+      async ({ url }) => {
+        const r1 = await postMessage(url, { handle: '@a', text: '' });
+        expect(r1.status).toBe(400);
+        const r2 = await postMessage(url, { handle: '@a', text: 'x'.repeat(4001) });
+        expect(r2.status).toBe(400);
+        const r3 = await postMessage(url, { handle: '@a', text: 42 });
+        expect(r3.status).toBe(400);
+        const r4 = await postMessage(url, { handle: '@a' });
+        expect(r4.status).toBe(400);
+        const r5 = await postMessage(url, { text: 'hi' });
+        expect(r5.status).toBe(400);
+        expect(bridge.sentMessages).toEqual([]);
+      },
+      { live: bridge },
+    );
+  });
+
+  it('POST /live/message accepts exactly MAX_TEXT_LEN chars', async () => {
+    const bridge = fakeBridge();
+    await withServer(
+      async ({ url }) => {
+        const res = await postMessage(url, { handle: '@a', text: 'x'.repeat(4000) });
+        expect(res.status).toBe(200);
+        expect(bridge.sentMessages).toHaveLength(1);
+      },
+      { live: bridge },
+    );
+  });
+
+  it('POST /live/message 400s when no bridge is attached', async () => {
+    await withServer(async ({ url }) => {
+      const res = await postMessage(url, { handle: '@a', text: 'hi' });
+      expect(res.status).toBe(400);
+      expect(((await res.json()) as { error: string }).error).toBe('live-not-attached');
+    });
+  });
+
+  it('POST /live/message 400s on invalid JSON', async () => {
+    const bridge = fakeBridge();
+    await withServer(
+      async ({ url }) => {
+        const res = await fetch(`${url}/live/message`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: '{nope',
+        });
+        expect(res.status).toBe(400);
+        expect(bridge.sentMessages).toEqual([]);
+      },
+      { live: bridge },
+    );
+  });
+
+  it('GET /live/message long-poll returns a queued message, then null when empty', async () => {
+    const bridge = fakeBridge();
+    bridge.msgQueue.set('@alice', [{ id: 'm1', text: 'yo', at: 123 }]);
+    await withServer(
+      async ({ url }) => {
+        const r1 = await fetch(`${url}/live/message?handle=${encodeURIComponent('@alice')}`);
+        expect(r1.status).toBe(200);
+        expect((await r1.json()) as { message: LiveMessage | null }).toStrictEqual({
+          message: { id: 'm1', text: 'yo', at: 123 },
+        });
+        const r2 = await fetch(`${url}/live/message?handle=${encodeURIComponent('@alice')}`);
+        expect((await r2.json()) as { message: LiveMessage | null }).toStrictEqual({
+          message: null,
+        });
+      },
+      { live: bridge },
+    );
+  });
+
+  it('GET /live/message 400s on a missing handle; without a bridge returns message:null', async () => {
+    const bridge = fakeBridge();
+    await withServer(
+      async ({ url }) => {
+        const res = await fetch(`${url}/live/message`);
+        expect(res.status).toBe(400);
+      },
+      { live: bridge },
+    );
+    await withServer(async ({ url }) => {
+      const res = await fetch(`${url}/live/message?handle=${encodeURIComponent('@a')}`);
+      expect(res.status).toBe(200);
+      expect((await res.json()) as { message: null; reason: string }).toStrictEqual({
+        message: null,
+        reason: 'live-not-attached',
+      });
+    });
+  });
+
+  it('createLiveBridge queues incoming messages per peer, caps the backlog, and sends via link.send', async () => {
+    const bridge = createLiveBridge();
+    let msgCb: ((m: LiveMessage) => void) | undefined;
+    const sentTexts: string[] = [];
+    const fakeLink = {
+      hello: { handle: '@peer', league: '10M', harness: 'codex' },
+      onSignal() {},
+      onClose() {},
+      onMessage(cb: (m: LiveMessage) => void) {
+        msgCb = cb;
+      },
+      send(t: string) {
+        sentTexts.push(t);
+      },
+    } as unknown as PeerLink;
+    bridge.addLink(fakeLink);
+
+    bridge.sendMessage('@peer', 'hi there');
+    expect(sentTexts).toEqual(['hi there']);
+    bridge.sendMessage('@ghost', 'no-op'); // unknown peer — silently dropped
+    expect(sentTexts).toEqual(['hi there']);
+
+    for (let i = 0; i < 205; i++) msgCb?.({ id: String(i), text: `m${i}`, at: i });
+    const first = await bridge.pollMessage('@peer', 10);
+    // Backlog capped at 200 — the oldest 5 were dropped.
+    expect(first?.text).toBe('m5');
+    expect(await bridge.pollMessage('@ghost', 10)).toBeNull();
   });
 });

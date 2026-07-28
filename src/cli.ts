@@ -56,7 +56,7 @@ import { createLiveBridge, startServer, type LiveBridge } from './server.js';
 import { runMcp } from './mcp.js';
 
 /** Mirrors package.json version (kept here; package.json imports are brittle under bundling). */
-const VERSION = '0.4.0';
+const VERSION = '0.4.1';
 
 /** Recognized top-level commands, plus the synthetic help/version. */
 export type Command =
@@ -83,7 +83,7 @@ export interface ParsedArgs {
   readonly live: boolean;
   /** `live --dating`: pick-a-handle mode vs omegle auto-pair. Default false. */
   readonly dating: boolean;
-  /** `discover --any` / `live --any`: match every league (not just ±1). Default false. */
+  /** `discover --any` / `live --any` / `open --any`: match every league (not just ±1). Default false. */
   readonly any: boolean;
   /** Positional argument for `handle`/`find` (e.g. `@name`). */
   readonly arg: string | undefined;
@@ -471,12 +471,13 @@ async function cmdDiscover(live: boolean, any: boolean): Promise<number> {
   return 0;
 }
 
-async function cmdOpen(port: number | undefined): Promise<number> {
+async function cmdOpen(port: number | undefined, any: boolean): Promise<number> {
   // Attach a live-signaling bridge IF the user has connected a profile, so the
-  // web app's Video button can reach real same-league peers. `open` is treated
-  // as the live opt-in exactly like `live` / `discover --live` (the command
-  // invocation grants consent). Without a profile the web app still serves the
-  // local dating demo — video just has nobody to call yet.
+  // web app can reach real peers. `open` is treated as the live opt-in exactly
+  // like `live` / `discover --live` (the command invocation grants consent), and
+  // honors the SAME league scoping as `live`/`discover`: your league ±1 by
+  // default, every league with `--any`. Without a profile the web app still
+  // serves the local dating demo — live just has nobody to reach yet.
   const profile = loadProfile();
   let live: LiveBridge | undefined;
   let session: DiscoverySession | undefined;
@@ -491,19 +492,30 @@ async function cmdOpen(port: number | undefined): Promise<number> {
   if (profile && live) {
     process.stdout.write(`\n  ${LIVE_NOTICE}\n`);
     const hello = buildHello(profile);
-    void startDiscovery({ hello, isBlocked: blockedChecker(), onLink: (link) => live!.addLink(link) })
+    const { topics, acceptLeague } = discoveryScope(profile.league, any);
+    void startDiscovery({
+      hello,
+      topics,
+      acceptLeague,
+      isBlocked: blockedChecker(),
+      onLink: (link) => live!.addLink(link),
+    })
       .then((s) => {
         session = s;
       })
       .catch(() => {
-        /* offline / DHT unreachable — web app still works, video just has no peers yet */
+        /* offline / DHT unreachable — web app still works, live just has no peers yet */
       });
   }
   process.stdout.write(`\n  vibedating local web app → ${started.url}\n`);
   if (live) {
-    process.stdout.write('  • live A/V (video) available for connected same-league peers\n');
+    process.stdout.write(
+      any
+        ? '  • live video + chat available for connected peers (ANY league — --any)\n'
+        : '  • live video + chat available for connected peers (your league + adjacent; --any = everyone)\n',
+    );
   } else {
-    process.stdout.write('  • connect first (`vibedating connect`) to enable live video\n');
+    process.stdout.write('  • connect first (`vibedating connect`) to enable live video + chat\n');
   }
   process.stdout.write('  • raw usage stays local · only league shared\n');
   process.stdout.write('  (Ctrl+C to stop)\n\n');
@@ -797,8 +809,9 @@ Usage:
   vibedating block <@handle>    Block a handle — their hello is dropped (never recorded/paired)
   vibedating unblock <@handle>  Remove a handle from the blocklist
   vibedating blocklist          List blocked handles
-  vibedating open [--port N]    Serve the local web app (default: random port)
-                                + live A/V video with connected same-league peers
+  vibedating open [--port N] [--any]  Serve the local web app (default: random port)
+                                + live video + chat with connected peers
+                                (your league + adjacent; --any = every league)
   vibedating mcp                Run the stdio MCP server (profile, matches)
   vibedating --version
   vibedating --help
@@ -812,9 +825,10 @@ Privacy:
   (real local logs) · ~ unverified · 🔑 identity-verified (signed hello).
 
 Matching:
-  discover/live match your league + adjacent (±1) tiers by default, so thin
-  leagues and cross-league friends still connect. --any matches every league.
-  find / live --to look for one specific handle instead of the first random peer.
+  discover/live/open match your league + adjacent (±1) tiers by default, so
+  thin leagues and cross-league friends still connect. --any matches every
+  league. find / live --to look for one specific handle instead of the first
+  random peer.
 
 Env:
   VIBEDATING_TOKENS=<n>   Self-report a token count (e.g. 23400000 or 12M)
@@ -847,7 +861,7 @@ async function main(argv: readonly string[]): Promise<number> {
     case 'discover':
       return cmdDiscover(parsed.live, parsed.any);
     case 'open':
-      return cmdOpen(parsed.port);
+      return cmdOpen(parsed.port, parsed.any);
     case 'live':
       return cmdLive(parsed.dating, parsed.any, parsed.to);
     case 'find':
