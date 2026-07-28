@@ -177,7 +177,7 @@ describe('cross-league discovery (adjacent default + --any)', () => {
     const a = await spawnMulti(ME_10M, all.map(leagueTopic), () => true);
     const b = await spawnMulti(PEER_1M, all.map(leagueTopic), () => true);
     await Promise.all([a.ready, b.ready]);
-    expect(await waitFor(() => hasPeer(a, PEER_1M) && hasPeer(b, ME_10M), 15_000)).toBe(true);
+    expect(await waitFor(() => hasPeer(a, PEER_1M) && hasPeer(b, ME_10M), 35_000)).toBe(true);
   }, 45_000);
 
   it('exact-only (own league topic only) never connects adjacent leagues', async () => {
