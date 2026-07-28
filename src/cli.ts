@@ -6,7 +6,7 @@
  *   vibedating matches          list candidates in your league (live peers if any)
  *   vibedating discover         join the DHT on your league topic, find live peers
  *   vibedating open             serve the local web app at http://localhost:PORT
- *   vibedating mcp              run the stdio MCP server
+ *   vibedating mcp              run the stdio MCP server (full agent-native tools)
  *   vibedating --version
  *   vibedating --help
  *
@@ -1325,7 +1325,8 @@ Usage:
                                 --room <name> opens the room view instead: roster +
                                 group chat + full-mesh group video (~6 people; an SFU
                                 is the upgrade path for bigger rooms).
-  vibedating mcp                Run the stdio MCP server (profile, matches)
+  vibedating mcp                Run the stdio MCP server (full agent-native tool surface:
+                                profile/connect/matches/handle/block/discover/live_*/room_*/media)
   vibedating --version
   vibedating --help
 
