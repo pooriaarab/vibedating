@@ -68,8 +68,15 @@ VIBEDATING_TOKENS=23400000 vibedating connect   # also accepts 12M / 1.2B / 500k
 
 ```
 vibedating connect            Read usage, compute + print your league
-vibedating matches [--live]   List candidates in your league (live peers if any)
+                              (first run auto-assigns a memetic handle — never @you)
+vibedating matches [--live]   List candidates in your league (live peers if any,
+                              with last-message time)
 vibedating discover [--live]  Find live same-league peers over the DHT (opt-in)
+vibedating live [--keep-alive]  Live text chat (--keep-alive / non-TTY survives stdin EOF)
+vibedating handle [@name]     Print or set your handle
+vibedating daemon [start|stop|status|install|uninstall]
+                              Notify-only background daemon — alerts on NEW matches,
+                              never opens chat/video; install = run on login (launchd/systemd)
 vibedating open [--port N]    Serve the local web app (default: random free port)
 vibedating mcp                Run the stdio MCP server (tools: profile, matches)
 vibedating --version

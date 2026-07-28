@@ -26,6 +26,7 @@ import { parseFrame, serializeFrame } from './frame.js';
 import { classifyHelloIdentity } from './identity.js';
 import { createPeerLink, type PeerLink } from './link.js';
 import { defaultStateDir } from './state.js';
+import { sanitizePeerText } from './untrusted.js';
 
 /* -------------------------------------------------------------------------- */
 /* Topic derivation                                                           */
@@ -441,7 +442,9 @@ export async function startDiscovery(opts: DiscoveryOptions): Promise<DiscoveryS
           try {
             notify(
               makeEvent('match', hello.harness as Harness, process.cwd(), {
-                summary: `matched with ${peer.handle} - LIVE SAME LEAGUE`,
+                // AEGIS-lite: the handle is untrusted wire data — sanitized for
+                // display (the structured `handle` field below stays verbatim).
+                summary: `matched with ${sanitizePeerText(peer.handle)} - LIVE SAME LEAGUE`,
                 handle: peer.handle,
                 league: peer.league,
                 harness: peer.harness,
