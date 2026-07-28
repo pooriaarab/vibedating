@@ -9,6 +9,7 @@ export default defineConfig({
       ['**/live.integration.test.ts', 'forks'],
       ['**/media.integration.test.ts', 'forks'],
       ['**/signal.integration.test.ts', 'forks'],
+      ['**/webrtc.integration.test.ts', 'forks'],
     ],
   },
 });
