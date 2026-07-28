@@ -9,6 +9,12 @@ Part of the **Vibe Suite** — companion tools for agentic coding CLIs. Ships as
 **CLI + npm package + MCP server**, plus a local web app. Built on
 [`@pooriaarab/vibe-core`](https://www.npmjs.com/package/@pooriaarab/vibe-core).
 
+## Demo
+
+[▶ Watch the launch video](branding/launch-video.mp4) — she matched with the man of her dreams. He was coding in a basement.
+
+https://github.com/pooriaarab/vibedating/raw/main/branding/launch-video.mp4
+
 > **Local-first.** Raw token usage is read and stored on your own machine and
 > **never leaves it.** Only the coarse league *bucket* is ever shared — never the
 > raw number, never per-project breakdowns. Live matching is peer-to-peer over a
