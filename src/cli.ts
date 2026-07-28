@@ -23,7 +23,7 @@ import { createLiveBridge, startServer, type LiveBridge } from './server.js';
 import { runMcp } from './mcp.js';
 
 /** Mirrors package.json version (kept here; package.json imports are brittle under bundling). */
-const VERSION = '0.1.0';
+const VERSION = '0.2.0';
 
 /** Recognized top-level commands, plus the synthetic help/version. */
 export type Command =
