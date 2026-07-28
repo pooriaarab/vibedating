@@ -20,7 +20,7 @@ import {
   type PeerHello,
 } from './p2p.js';
 import type { PeerLink } from './link.js';
-import type { ReceivedMedia } from './media.js';
+import { DEFAULT_CHUNK_BYTES, type ReceivedMedia } from './media.js';
 
 const ALICE: PeerHello = { handle: '@alice_10M', league: '10M', harness: 'claude-code' };
 const BOB: PeerHello = { handle: '@bob_10M', league: '10M', harness: 'codex' };
@@ -95,6 +95,41 @@ function buildPng(width: number, height: number): Buffer {
     pngChunk('IDAT', idat),
     pngChunk('IEND', Buffer.alloc(0)),
   ]);
+}
+
+/* -------------------------------------------------------------------------- */
+/* Minimal valid MP4 builder (real ISO-BMFF box layout: ftyp + mdat)           */
+/* -------------------------------------------------------------------------- */
+
+function mp4Box(type: string, payload: Buffer): Buffer {
+  const len = Buffer.alloc(4);
+  len.writeUInt32BE(payload.length + 8, 0);
+  return Buffer.concat([len, Buffer.from(type, 'ascii'), payload]);
+}
+
+/**
+ * Build a structurally valid MP4 (ISO-BMFF) file of approximately `targetBytes`.
+ * Two genuine boxes: an `ftyp` (major brand `isom`, minor version 0x200) header,
+ * then a single `mdat` carrying a deterministic high-entropy payload. The box
+ * headers are real, so the file is a parseable MP4 container; the `mdat` is
+ * sized so the whole file spans >= 3 chunks (DEFAULT_CHUNK_BYTES), exercising
+ * seq ordering + reassembly rather than a one-chunk send. (Real decodable
+ * video MEDIA is covered by the WebRTC integration test; here the point is the
+ * multi-chunk file-transfer byte-equality over the P2P socket.)
+ */
+function buildMp4(targetBytes: number): Buffer {
+  const ftypHead = Buffer.alloc(8);
+  ftypHead.write('isom', 0, 'ascii'); // major brand
+  ftypHead.writeUInt32BE(0x00000200, 4); // minor version
+  const ftyp = mp4Box('ftyp', Buffer.concat([ftypHead, Buffer.from('isom', 'ascii')]));
+  const mdatPayload = Buffer.alloc(Math.max(0, targetBytes - ftyp.length));
+  // Deterministic 32-bit LCG → a reproducible, non-degenerate byte stream.
+  let state = 0x1234abcd >>> 0;
+  for (let i = 0; i < mdatPayload.length; i++) {
+    state = (Math.imul(state, 1664525) + 1013904223) >>> 0;
+    mdatPayload[i] = state & 0xff;
+  }
+  return Buffer.concat([ftyp, mp4Box('mdat', mdatPayload)]);
 }
 
 describe('media transfer (in-process DHT, no public network)', () => {
@@ -183,5 +218,55 @@ describe('media transfer (in-process DHT, no public network)', () => {
     expect(got.size).toBe(png.length);
     // The multi-machine proof: bytes on disk EQUAL the original.
     expect(readFileSync(got.path)).toEqual(png);
+  }, 45_000);
+
+  it('node A sends a small VIDEO file (multi-chunk), node B reassembles identical bytes', async () => {
+    const topic = randomTopic();
+
+    // Build a ~30 KiB structurally-valid MP4. Sized ABOVE DEFAULT_CHUNK_BYTES so
+    // the transfer is genuinely multi-chunk (>= 3 chunks) — exercising seq
+    // ordering + reassembly, not a one-chunk send.
+    const mp4 = buildMp4(30 * 1024);
+    expect(mp4.subarray(4, 8).toString('ascii')).toBe('ftyp'); // valid MP4 box header
+    expect(mp4.subarray(8, 12).toString('ascii')).toBe('isom'); // major brand
+    const expectedChunks = Math.ceil(mp4.length / DEFAULT_CHUNK_BYTES);
+    expect(expectedChunks).toBeGreaterThanOrEqual(3); // proves multi-chunk
+    const mp4Path = path.join(tmpDir(), 'clip.mp4');
+    writeFileSync(mp4Path, mp4);
+
+    let linkA: PeerLink | undefined;
+    let linkB: PeerLink | undefined;
+    const received: ReceivedMedia[] = [];
+
+    const a = await spawnWithLink(ALICE, topic, (l) => {
+      linkA = l;
+    });
+    const b = await spawnWithLink(BOB, topic, (l) => {
+      linkB = l;
+      // B must register onMedia BEFORE A sends, so the receiver exists when
+      // the first media-start frame arrives.
+      l.onMedia((m) => {
+        receivedPaths.push(m.path);
+        received.push(m);
+      });
+    });
+    await Promise.all([a.ready, b.ready]);
+
+    expect(await waitFor(() => !!linkA && !!linkB, 15_000)).toBe(true);
+
+    // A sends the video file over its live PeerLink (chunked, backpressure-aware).
+    const sent = await linkA!.sendMedia(mp4Path);
+    expect(sent.size).toBe(mp4.length);
+
+    // B's onMedia fires with the reassembled file.
+    expect(await waitFor(() => received.length === 1, 15_000)).toBe(true);
+
+    const got = received[0]!;
+    expect(got.mime).toBe('video/mp4'); // inferred from the .mp4 extension
+    expect(got.name).toBe('clip.mp4');
+    expect(got.size).toBe(mp4.length);
+    // The multi-machine proof for VIDEO/large-file sending: bytes on disk EQUAL
+    // the original, despite spanning multiple ordered chunks.
+    expect(readFileSync(got.path)).toEqual(mp4);
   }, 45_000);
 });
