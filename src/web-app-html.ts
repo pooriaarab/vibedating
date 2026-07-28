@@ -548,15 +548,23 @@ export const webAppHtml = `<!DOCTYPE html>
     max-width: 85%; padding: 7px 11px; border-radius: 13px;
     font-size: .82rem; line-height: 1.4; word-break: break-word; white-space: pre-wrap;
   }
+  .cp-msg img, .cp-msg video { max-width: 100%; border-radius: 8px; margin-top: 4px; display: block; }
+  .cp-msg a.media-link { color: var(--coral); text-decoration: underline; word-break: break-all; }
   .cp-msg.them{ align-self: flex-start; background: rgba(248,239,232,.07); border: 1px solid var(--border); }
   .cp-msg.you{ align-self: flex-end; background: rgba(255,122,104,.16); border: 1px solid rgba(255,122,104,.32); }
   .cp-msg.sys{ align-self: center; background: transparent; border: 0; color: var(--muted-2); font-size: .72rem; padding: 2px 6px; }
   .chat-panel .cp-inputrow{ display: flex; gap: 8px; padding: 10px; border-top: 1px solid var(--border); }
-  .chat-panel .cp-inputrow input{
+  .chat-panel .cp-inputrow input[type="text"]{
     flex: 1; border: 1px solid var(--border-2); border-radius: 10px; background: rgba(0,0,0,.22);
     color: var(--fg); padding: 9px 11px; font: inherit; font-size: .82rem; outline: none; min-width: 0;
   }
-  .chat-panel .cp-inputrow input:focus{ border-color: var(--coral); }
+  .chat-panel .cp-inputrow input[type="text"]:focus{ border-color: var(--coral); }
+  .chat-panel .cp-attach{
+    border: 1px solid var(--border-2); border-radius: 10px; background: rgba(0,0,0,.22);
+    color: var(--muted); padding: 9px 12px; font-size: 1rem; flex-shrink: 0;
+    transition: color var(--dur-fast) ease, border-color var(--dur-fast) ease;
+  }
+  .chat-panel .cp-attach:hover{ color: var(--fg); border-color: var(--muted-2); }
   .chat-panel .cp-send{
     border: 0; border-radius: 10px; padding: 9px 14px; font-weight: 700; font-size: .8rem;
     background: linear-gradient(180deg, var(--coral), var(--coral-dim)); color: #2a1109;
@@ -735,6 +743,8 @@ export const webAppHtml = `<!DOCTYPE html>
   </div>
   <div class="cp-msgs" id="chatMsgs"></div>
   <div class="cp-inputrow">
+    <button class="cp-attach" id="chatAttachBtn" type="button" aria-label="Attach file" title="Attach file">📎</button>
+    <input type="file" id="chatFileInput" style="display:none;">
     <input id="chatInput" type="text" maxlength="4000" placeholder="message&hellip;" autocomplete="off">
     <button class="cp-send" id="chatSend" type="button">Send</button>
   </div>
@@ -1253,6 +1263,8 @@ export const webAppHtml = `<!DOCTYPE html>
   var chatSub = document.getElementById("chatSub");
   var chatMsgs = document.getElementById("chatMsgs");
   var chatInput = document.getElementById("chatInput");
+  var chatAttachBtn = document.getElementById("chatAttachBtn");
+  var chatFileInput = document.getElementById("chatFileInput");
   var chatSend = document.getElementById("chatSend");
   var chatClose = document.getElementById("chatClose");
 
@@ -1260,6 +1272,7 @@ export const webAppHtml = `<!DOCTYPE html>
   var conversations = {};   // handle -> [{from:"you"|"them"|"sys", text}]
   var unread = {};          // handle -> count of unseen incoming messages
   var chatLoops = {};       // handle -> true while its poll loop is running
+  var mediaLoops = {};      // handle -> true while its poll loop is running
   var MAX_CHAT_KEPT = 200;  // per-conversation local cap (mirrors the server)
 
   function fetchMessage(handle, timeoutMs){
@@ -1270,11 +1283,27 @@ export const webAppHtml = `<!DOCTYPE html>
       .catch(function(e){ clearTimeout(t); throw e; });
   }
 
+  function fetchMedia(handle, timeoutMs){
+    var ctrl = new AbortController();
+    var t = setTimeout(function(){ ctrl.abort(); }, timeoutMs);
+    return fetch("/live/media?handle=" + encodeURIComponent(handle), { signal: ctrl.signal })
+      .then(function(r){ clearTimeout(t); return r; })
+      .catch(function(e){ clearTimeout(t); throw e; });
+  }
+
   function postChat(handle, text){
     return fetch("/live/message", {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ handle: handle, text: text })
+    });
+  }
+
+  function postMedia(handle, name, mime, dataB64){
+    return fetch("/live/media", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ handle: handle, name: name, mime: mime, dataB64: dataB64 })
     });
   }
 
@@ -1292,27 +1321,51 @@ export const webAppHtml = `<!DOCTYPE html>
   // One long-poll loop per connected peer: started when the peer is first
   // seen, stopped when it vanishes (its mailbox on the server is gone).
   function ensureChatLoop(handle){
-    if (chatLoops[handle]) return;
-    chatLoops[handle] = true;
-    (async function(){
-      while (peerKnown(handle)) {
-        var res;
-        try { res = await fetchMessage(handle, 30000); }
-        catch(e){ await sleep(1000); continue; }
-        if (!res || res.status !== 200) { await sleep(1000); continue; }
-        var data = await res.json();
-        var m = data && data.message;
-        if (!m) continue; // timed out empty
-        pushChat(handle, { from: "them", text: m.text });
-        if (chatWith === handle) {
-          renderChat();
-        } else {
-          unread[handle] = (unread[handle] || 0) + 1;
-          renderLiveRows(knownPeers);
+    if (!chatLoops[handle]) {
+      chatLoops[handle] = true;
+      (async function(){
+        while (peerKnown(handle)) {
+          var res;
+          try { res = await fetchMessage(handle, 30000); }
+          catch(e){ await sleep(1000); continue; }
+          if (!res || res.status !== 200) { await sleep(1000); continue; }
+          var data = await res.json();
+          var m = data && data.message;
+          if (!m) continue; // timed out empty
+          pushChat(handle, { from: "them", text: m.text });
+          if (chatWith === handle) {
+            renderChat();
+          } else {
+            unread[handle] = (unread[handle] || 0) + 1;
+            renderLiveRows(knownPeers);
+          }
         }
-      }
-      delete chatLoops[handle];
-    })();
+        delete chatLoops[handle];
+      })();
+    }
+
+    if (!mediaLoops[handle]) {
+      mediaLoops[handle] = true;
+      (async function(){
+        while (peerKnown(handle)) {
+          var res;
+          try { res = await fetchMedia(handle, 30000); }
+          catch(e){ await sleep(1000); continue; }
+          if (!res || res.status !== 200) { await sleep(1000); continue; }
+          var data = await res.json();
+          var m = data && data.media;
+          if (!m) continue; // timed out empty
+          pushChat(handle, { from: "them", media: m });
+          if (chatWith === handle) {
+            renderChat();
+          } else {
+            unread[handle] = (unread[handle] || 0) + 1;
+            renderLiveRows(knownPeers);
+          }
+        }
+        delete mediaLoops[handle];
+      })();
+    }
   }
 
   function renderChat(){
@@ -1328,8 +1381,30 @@ export const webAppHtml = `<!DOCTYPE html>
     conv.forEach(function(m){
       var el = document.createElement("div");
       el.className = "cp-msg " + (m.from === "you" ? "you" : m.from === "sys" ? "sys" : "them");
-      // textContent only — a peer's text is never parsed as HTML.
-      el.textContent = m.text;
+      if (m.media) {
+        var isImage = m.media.mime.indexOf("image/") === 0;
+        var isVideo = m.media.mime.indexOf("video/") === 0;
+        if (isImage) {
+          var img = document.createElement("img");
+          img.src = "data:" + m.media.mime + ";base64," + m.media.dataB64;
+          el.appendChild(img);
+        } else if (isVideo) {
+          var vid = document.createElement("video");
+          vid.src = "data:" + m.media.mime + ";base64," + m.media.dataB64;
+          vid.controls = true;
+          el.appendChild(vid);
+        } else {
+          var a = document.createElement("a");
+          a.className = "media-link";
+          a.href = "data:" + (m.media.mime || "application/octet-stream") + ";base64," + m.media.dataB64;
+          a.download = m.media.name;
+          a.textContent = "📎 " + m.media.name;
+          el.appendChild(a);
+        }
+      } else {
+        // textContent only — a peer's text is never parsed as HTML.
+        el.textContent = m.text;
+      }
       chatMsgs.appendChild(el);
     });
     chatMsgs.scrollTop = chatMsgs.scrollHeight;
@@ -1370,6 +1445,34 @@ export const webAppHtml = `<!DOCTYPE html>
   }
   chatSend.addEventListener("click", sendChat);
   chatInput.addEventListener("keydown", function(e){ if (e.key === "Enter") sendChat(); });
+
+  chatAttachBtn.addEventListener("click", function(){
+    if (!chatWith) return;
+    chatFileInput.click();
+  });
+  chatFileInput.addEventListener("change", function(e){
+    var target = chatWith;
+    if (!target) return;
+    var file = e.target.files[0];
+    if (!file) return;
+    chatFileInput.value = ""; // clear
+    var reader = new FileReader();
+    reader.onload = function(evt) {
+      var res = evt.target.result; // data:mime;base64,.....
+      var mime = res.split(';')[0].split(':')[1] || '';
+      var b64 = res.split(',')[1];
+      postMedia(target, file.name, mime, b64).then(function(r){
+        pushChat(target, r && r.status === 200
+          ? { from: "you", media: { name: file.name, mime: mime, dataB64: b64 } }
+          : { from: "sys", text: "(file not delivered — too large or peer offline?)" });
+        if (chatWith === target) renderChat();
+      }).catch(function(){
+        pushChat(target, { from: "sys", text: "(file not delivered — server unreachable)" });
+        if (chatWith === target) renderChat();
+      });
+    };
+    reader.readAsDataURL(file);
+  });
 
   // Render the live-peers rows: one per connected peer with its verification
   // marks, a Chat button (opens the conversation), and a Call button that
