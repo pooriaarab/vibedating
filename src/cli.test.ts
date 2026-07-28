@@ -23,8 +23,8 @@ describe('parseArgs — --live opt-in flag', () => {
   });
 
   it('sets live on discover and matches', () => {
-    expect(parseArgs(['discover', '--live'])).toEqual({ command: 'discover', port: undefined, live: true, dating: false, any: false, keepAlive: false });
-    expect(parseArgs(['--live', 'matches'])).toEqual({ command: 'matches', port: undefined, live: true, dating: false, any: false, keepAlive: false });
+    expect(parseArgs(['discover', '--live'])).toEqual({ command: 'discover', port: undefined, live: true, dating: false, any: false, keepAlive: false, viaRelay: false });
+    expect(parseArgs(['--live', 'matches'])).toEqual({ command: 'matches', port: undefined, live: true, dating: false, any: false, keepAlive: false, viaRelay: false });
   });
 
   it('combines with --port', () => {
@@ -35,6 +35,7 @@ describe('parseArgs — --live opt-in flag', () => {
       dating: false,
       any: false,
       keepAlive: false,
+      viaRelay: false,
     });
   });
 });
@@ -57,21 +58,21 @@ describe('parseArgs — version / help flags', () => {
 
 describe('parseArgs — open --port', () => {
   it('accepts --port <n>', () => {
-    expect(parseArgs(['open', '--port', '8080'])).toEqual({ command: 'open', port: 8080, live: false, dating: false, any: false, keepAlive: false });
+    expect(parseArgs(['open', '--port', '8080'])).toEqual({ command: 'open', port: 8080, live: false, dating: false, any: false, keepAlive: false, viaRelay: false });
   });
 
   it('accepts --port=<n>', () => {
-    expect(parseArgs(['open', '--port=8080'])).toEqual({ command: 'open', port: 8080, live: false, dating: false, any: false, keepAlive: false });
+    expect(parseArgs(['open', '--port=8080'])).toEqual({ command: 'open', port: 8080, live: false, dating: false, any: false, keepAlive: false, viaRelay: false });
   });
 
   it('rejects out-of-range / non-numeric ports (undefined, command intact)', () => {
-    expect(parseArgs(['open', '--port', 'nope'])).toEqual({ command: 'open', port: undefined, live: false, dating: false, any: false, keepAlive: false });
+    expect(parseArgs(['open', '--port', 'nope'])).toEqual({ command: 'open', port: undefined, live: false, dating: false, any: false, keepAlive: false, viaRelay: false });
     expect(parseArgs(['open', '--port', '0']).port).toBeUndefined();
     expect(parseArgs(['open', '--port', '70000']).port).toBeUndefined();
   });
 
   it('ignores --port with no following value', () => {
-    expect(parseArgs(['open', '--port'])).toEqual({ command: 'open', port: undefined, live: false, dating: false, any: false, keepAlive: false });
+    expect(parseArgs(['open', '--port'])).toEqual({ command: 'open', port: undefined, live: false, dating: false, any: false, keepAlive: false, viaRelay: false });
   });
 });
 
@@ -103,6 +104,7 @@ describe('parseArgs — live --dating', () => {
       dating: true,
       any: false,
       keepAlive: false,
+      viaRelay: false,
     });
   });
 
@@ -114,6 +116,7 @@ describe('parseArgs — live --dating', () => {
       dating: true,
       any: false,
       keepAlive: false,
+      viaRelay: false,
     });
   });
 });
@@ -229,6 +232,7 @@ describe('parseArgs — --any flag', () => {
       dating: false,
       any: true,
       keepAlive: false,
+      viaRelay: false,
     });
     expect(parseArgs(['live', '--any'])).toEqual({
       command: 'live',
@@ -237,6 +241,7 @@ describe('parseArgs — --any flag', () => {
       dating: false,
       any: true,
       keepAlive: false,
+      viaRelay: false,
     });
   });
 
@@ -248,6 +253,7 @@ describe('parseArgs — --any flag', () => {
       dating: false,
       any: true,
       keepAlive: false,
+      viaRelay: false,
     });
     expect(parseArgs(['open', '--any', '--port', '8080'])).toEqual({
       command: 'open',
@@ -256,6 +262,7 @@ describe('parseArgs — --any flag', () => {
       dating: false,
       any: true,
       keepAlive: false,
+      viaRelay: false,
     });
     expect(parseArgs(['open']).any).toBe(false);
   });
@@ -268,6 +275,7 @@ describe('parseArgs — --any flag', () => {
       dating: false,
       any: true,
       keepAlive: false,
+      viaRelay: false,
     });
     expect(parseArgs(['live', '--dating', '--any'])).toEqual({
       command: 'live',
@@ -276,6 +284,7 @@ describe('parseArgs — --any flag', () => {
       dating: true,
       any: true,
       keepAlive: false,
+      viaRelay: false,
     });
   });
 });
@@ -291,6 +300,40 @@ describe('parseArgs — live --keep-alive', () => {
     expect(parseArgs(['live', '--keep-alive', '--any'])).toMatchObject({
       command: 'live',
       keepAlive: true,
+      any: true,
+    });
+  });
+});
+
+describe('parseArgs — --via-relay fallback flag', () => {
+  it('defaults to false', () => {
+    expect(parseArgs(['live']).viaRelay).toBe(false);
+    expect(parseArgs(['discover']).viaRelay).toBe(false);
+    expect(parseArgs(['discover', '--live']).viaRelay).toBe(false);
+  });
+
+  it('sets viaRelay on live', () => {
+    expect(parseArgs(['live', '--via-relay'])).toEqual({
+      command: 'live',
+      port: undefined,
+      live: false,
+      dating: false,
+      any: false,
+      to: undefined,
+      keepAlive: false,
+      viaRelay: true,
+    });
+  });
+
+  it('sets viaRelay on discover', () => {
+    expect(parseArgs(['discover', '--via-relay']).viaRelay).toBe(true);
+  });
+
+  it('combines --via-relay with --to and --any', () => {
+    expect(parseArgs(['live', '--via-relay', '--to', '@alice', '--any'])).toMatchObject({
+      command: 'live',
+      viaRelay: true,
+      to: '@alice',
       any: true,
     });
   });

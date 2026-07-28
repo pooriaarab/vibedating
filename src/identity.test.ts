@@ -15,6 +15,7 @@ import {
   canonicalHelloClaims,
   classifyHelloIdentity,
   loadOrCreateIdentity,
+  loadOrCreateNostrKey,
   signHelloClaims,
   verifyHelloClaims,
   type HelloClaims,
@@ -149,7 +150,6 @@ describe('classifyHelloIdentity', () => {
   afterEach(() => {
     rmSync(dir, { recursive: true, force: true });
   });
-
   it('no pubkey → legacy (accepted as unverified, backward compatible)', () => {
     expect(classifyHelloIdentity({ handle: '@old', league: '10M', harness: 'codex' })).toBe('legacy');
   });
@@ -178,5 +178,59 @@ describe('classifyHelloIdentity', () => {
     expect(
       classifyHelloIdentity({ ...CLAIMS, handle: '@mallory', ...proof }),
     ).toBe('drop');
+  });
+});
+
+describe('loadOrCreateNostrKey — secp256k1 key for the relay fallback', () => {
+  let dir: string;
+  beforeEach(() => {
+    dir = mkdtempSync(path.join(os.tmpdir(), 'vibedating-nostr-'));
+  });
+  afterEach(() => {
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('generates on first use, persists, and reloads the SAME key', async () => {
+    const first = await loadOrCreateNostrKey(dir);
+    expect(first.pubkey).toMatch(/^[0-9a-f]{64}$/);
+    expect(first.sk).toBeInstanceOf(Uint8Array);
+    expect(first.sk).toHaveLength(32);
+    const second = await loadOrCreateNostrKey(dir);
+    expect(second.pubkey).toBe(first.pubkey);
+    expect(Buffer.from(second.sk).toString('hex')).toBe(Buffer.from(first.sk).toString('hex'));
+  });
+
+  it('stores nostr.json with mode 0600', async () => {
+    await loadOrCreateNostrKey(dir);
+    const mode = statSync(path.join(dir, 'nostr.json')).mode & 0o777;
+    expect(mode).toBe(0o600);
+  });
+
+  it('hardens a pre-existing loose file back to 0600 on load', async () => {
+    await loadOrCreateNostrKey(dir);
+    const file = path.join(dir, 'nostr.json');
+    chmodSync(file, 0o644);
+    expect(statSync(file).mode & 0o777).toBe(0o644);
+    await loadOrCreateNostrKey(dir);
+    expect(statSync(file).mode & 0o777).toBe(0o600);
+  });
+
+  it('regenerates when the file is corrupt', async () => {
+    const first = await loadOrCreateNostrKey(dir);
+    writeFileSync(path.join(dir, 'nostr.json'), 'not json at all');
+    const second = await loadOrCreateNostrKey(dir);
+    expect(second.pubkey).toMatch(/^[0-9a-f]{64}$/);
+    expect(second.pubkey).not.toBe(first.pubkey);
+  });
+
+  it('is a SEPARATE key from the ed25519 identity (different curves)', async () => {
+    const ed = loadOrCreateIdentity(dir);
+    const nos = await loadOrCreateNostrKey(dir);
+    // Both are 64-hex, but generated independently from unrelated curves — they
+    // must not collide.
+    expect(nos.pubkey).not.toBe(ed.publicKeyHex);
+    // Files are distinct.
+    expect(statSync(path.join(dir, 'identity.json')).mode & 0o777).toBe(0o600);
+    expect(statSync(path.join(dir, 'nostr.json')).mode & 0o777).toBe(0o600);
   });
 });
