@@ -235,6 +235,24 @@ describe('parseArgs — --any flag', () => {
     });
   });
 
+  it('sets any on open (same scoping as discover/live)', () => {
+    expect(parseArgs(['open', '--any'])).toEqual({
+      command: 'open',
+      port: undefined,
+      live: false,
+      dating: false,
+      any: true,
+    });
+    expect(parseArgs(['open', '--any', '--port', '8080'])).toEqual({
+      command: 'open',
+      port: 8080,
+      live: false,
+      dating: false,
+      any: true,
+    });
+    expect(parseArgs(['open']).any).toBe(false);
+  });
+
   it('combines --any with --live and --dating (all flags independent)', () => {
     expect(parseArgs(['discover', '--live', '--any'])).toEqual({
       command: 'discover',
