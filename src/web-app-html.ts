@@ -998,12 +998,6 @@ export const webAppHtml = `<!DOCTYPE html>
   var incomingCaller = document.getElementById("incomingCaller");
   var acceptBtn = document.getElementById("acceptBtn");
   var declineBtn = document.getElementById("declineBtn");
-  var chatPanel = document.getElementById("chatPanel");
-  var chatTitle = document.getElementById("chatTitle");
-  var chatClose = document.getElementById("chatClose");
-  var chatMsgs = document.getElementById("chatMsgs");
-  var chatInput = document.getElementById("chatInput");
-  var chatSend = document.getElementById("chatSend");
 
   // One in-flight call's state. remoteHandle === null means idle.
   var rtc = { pc: null, localStream: null, remoteHandle: null, role: null };
@@ -1011,15 +1005,6 @@ export const webAppHtml = `<!DOCTYPE html>
   var pendingOffer = null;
   var knownPeers = [];
   var idleIdx = 0;
-
-  // Per-peer text chat state. histories[handle] is the transcript rendered in
-  // the panel ({who: "you"|"them"|"sys", text}); unread[handle] badges the
-  // row's Chat button when a text lands while the panel is closed or bound to
-  // another peer. msgPollers[handle] marks a live long-poll loop for that peer.
-  var chatHandle = null;
-  var histories = {};
-  var unread = {};
-  var msgPollers = {};
 
   function rtcConfig(){
     // A public STUN server crosses most NATs. No TURN in v0 — symmetric NATs

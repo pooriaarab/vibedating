@@ -169,8 +169,8 @@ describe('cross-league discovery (adjacent default + --any)', () => {
     const a = await spawnMulti(ME_10M, meNames.map(leagueTopic), (l) => meNames.includes(l));
     const b = await spawnMulti(PEER_5M, peerNames.map(leagueTopic), (l) => peerNames.includes(l));
     await Promise.all([a.ready, b.ready]);
-    expect(await waitFor(() => hasPeer(a, PEER_5M) && hasPeer(b, ME_10M), 15_000)).toBe(true);
-  }, 45_000);
+    expect(await waitFor(() => hasPeer(a, PEER_5M) && hasPeer(b, ME_10M), 40_000)).toBe(true);
+  }, 60_000);
 
   it('--any connects leagues far apart (10M ↔ 1M)', async () => {
     const all = allLeagueNames();

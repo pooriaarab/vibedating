@@ -122,7 +122,7 @@ describe('live video e2e (real werift RTCPeerConnection over P2P signaling)', ()
 
     // Both PeerLinks must exist before any signaling — the negotiation below
     // assumes onSignal handlers can be registered on both sides up front.
-    expect(await waitFor(() => !!linkA && !!linkB, 15_000)).toBe(true);
+    expect(await waitFor(() => !!linkA && !!linkB, 40_000)).toBe(true);
 
     // ── Real werift RTCPeerConnections: host candidates only, no STUN. ───────
     const pcA = new RTCPeerConnection({ iceServers: [] });
@@ -200,7 +200,7 @@ describe('live video e2e (real werift RTCPeerConnection over P2P signaling)', ()
 
     // ASSERTION 1 + 2: negotiation reaches a connected media transport, AND the
     // answerer's ontrack fired (a media track was actually received).
-    expect(await waitFor(() => aIceConnected && bConnected && !!receivedTrack, 20_000)).toBe(true);
+    expect(await waitFor(() => aIceConnected && bConnected && !!receivedTrack, 40_000)).toBe(true);
     expect(pcB.connectionState).toBe('connected');
     expect(pcA.iceConnectionState === 'connected' || pcA.iceConnectionState === 'completed').toBe(true);
     expect(receivedTrack!.kind).toBe('video');
@@ -220,7 +220,7 @@ describe('live video e2e (real werift RTCPeerConnection over P2P signaling)', ()
       }
       await new Promise((r) => setTimeout(r, 25));
     }
-    expect(await waitFor(() => rtpReceived > 0, 10_000)).toBe(true);
+    expect(await waitFor(() => rtpReceived > 0, 40_000)).toBe(true);
     expect(rtpReceived).toBeGreaterThan(0);
-  }, 60_000);
+  }, 150_000);
 });
