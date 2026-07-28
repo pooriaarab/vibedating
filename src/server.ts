@@ -30,6 +30,7 @@ import { CANDIDATES, matches, readUsage } from './index.js';
 import { parseFrame, type RtcFrame } from './frame.js';
 import type { PeerLink } from './link.js';
 import { connectProfile, loadProfile, type ProfileState } from './state.js';
+import { sanitizePeerText } from './untrusted.js';
 import { webAppHtml } from './web-app-html.js';
 
 /** Sink for milestone notifications. Injectable so tests can capture events. */
@@ -140,7 +141,10 @@ export function createLiveBridge(): LiveBridge {
       link.onMessage((m) => {
         const mb = boxes.get(handle);
         if (!mb) return;
-        mb.messages.push(m);
+        // AEGIS-lite: peer text is UNTRUSTED display data — never executed,
+        // never passed to a shell/agent; sanitized at ingress (the web app
+        // renders via textContent too — defense in depth).
+        mb.messages.push({ ...m, text: sanitizePeerText(m.text) });
         if (mb.messages.length > MAX_QUEUED_MESSAGES) {
           mb.messages.splice(0, mb.messages.length - MAX_QUEUED_MESSAGES);
         }

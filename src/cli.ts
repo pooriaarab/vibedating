@@ -37,6 +37,7 @@ import {
 } from './p2p.js';
 import { loadOrCreateIdentity, signHelloClaims } from './identity.js';
 import { ensureHandle } from './handlegen.js';
+import { sanitizePeerText } from './untrusted.js';
 import {
   daemonStatus,
   installDaemonService,
@@ -646,11 +647,14 @@ async function cmdLive(
       return;
     }
     const { qual } = peerDirection(profile.league, link.hello.league);
+    // AEGIS-lite: the handle is wire data — display-sanitized, never trusted.
     process.stdout.write(
-      `  · matched ${link.hello.handle} (${link.hello.league}${qual} · ${link.hello.harness}) ${usageMark(link.hello)}${idMark(link.hello)}\n`,
+      `  · matched ${sanitizePeerText(link.hello.handle)} (${link.hello.league}${qual} · ${link.hello.harness}) ${usageMark(link.hello)}${idMark(link.hello)}\n`,
     );
     link.onMessage((m) => {
-      process.stdout.write(`  <${link.hello.handle}> ${m.text}\n`);
+      // AEGIS-lite: chat text is UNTRUSTED display data — never executed, never
+      // passed to a shell/agent; control/bidi chars stripped before printing.
+      process.stdout.write(`  <${sanitizePeerText(link.hello.handle)}> ${sanitizePeerText(m.text)}\n`);
     });
   });
 
@@ -667,13 +671,13 @@ async function cmdLive(
       if (target !== null && !sameHandle(link.hello.handle, target)) {
         const { qual } = peerDirection(profile.league, link.hello.league);
         process.stdout.write(
-          `  + ${link.hello.handle} (${link.hello.league}${qual}) ${usageMark(link.hello)}${idMark(link.hello)} — not your target\n`,
+          `  + ${sanitizePeerText(link.hello.handle)} (${link.hello.league}${qual}) ${usageMark(link.hello)}${idMark(link.hello)} — not your target\n`,
         );
         link.close();
         return;
       }
       if (target !== null) {
-        process.stdout.write(`  ★ found ${link.hello.handle} — auto-opening\n`);
+        process.stdout.write(`  ★ found ${sanitizePeerText(link.hello.handle)} — auto-opening\n`);
       }
       pairing.add(link);
     },
@@ -908,8 +912,10 @@ async function cmdDaemonRun(any: boolean): Promise<number> {
     acceptLeague,
     isBlocked: blockedChecker(),
     onPeer: (peer, isNew) => {
+      // AEGIS-lite: the handle is untrusted wire data — sanitized so a hostile
+      // peer can't forge log lines in daemon.log.
       process.stdout.write(
-        `  [${new Date().toISOString()}] ${isNew ? 'NEW match' : 'peer seen'}: ${peer.handle} (${peer.league} · ${peer.harness})\n`,
+        `  [${new Date().toISOString()}] ${isNew ? 'NEW match' : 'peer seen'}: ${sanitizePeerText(peer.handle)} (${peer.league} · ${peer.harness})\n`,
       );
     },
   });
