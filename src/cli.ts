@@ -42,6 +42,7 @@ import {
   loadProfile,
   normalizeHandle,
   resolveHandle,
+  sameHandle,
   saveHandle,
 } from './state.js';
 import { createLiveBridge, startServer, type LiveBridge } from './server.js';
@@ -57,6 +58,7 @@ export type Command =
   | 'discover'
   | 'open'
   | 'live'
+  | 'find'
   | 'handle'
   | 'mcp'
   | 'help'
@@ -73,8 +75,10 @@ export interface ParsedArgs {
   readonly dating: boolean;
   /** `discover --any` / `live --any`: match every league (not just ±1). Default false. */
   readonly any: boolean;
-  /** Positional argument for `handle` (e.g. `@name`). */
+  /** Positional argument for `handle`/`find` (e.g. `@name`). */
   readonly arg: string | undefined;
+  /** `live --to <@handle>`: targeted match — auto-open that specific peer. */
+  readonly to: string | undefined;
 }
 
 function parsePort(raw: string): number | undefined {
@@ -95,6 +99,7 @@ export function parseArgs(argv: readonly string[]): ParsedArgs {
     dating: false,
     any: false,
     arg: undefined,
+    to: undefined,
   };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i]!;
@@ -106,6 +111,7 @@ export function parseArgs(argv: readonly string[]): ParsedArgs {
         dating: false,
         any: false,
         arg: undefined,
+        to: undefined,
       };
     }
     if (a === '--help' || a === '-h') {
@@ -116,6 +122,7 @@ export function parseArgs(argv: readonly string[]): ParsedArgs {
         dating: false,
         any: false,
         arg: undefined,
+        to: undefined,
       };
     }
     if (a === '--live') {
@@ -144,6 +151,18 @@ export function parseArgs(argv: readonly string[]): ParsedArgs {
       if (p !== undefined) out = { ...out, port: p };
       continue;
     }
+    if (a === '--to') {
+      const next = argv[i + 1];
+      if (next !== undefined) {
+        out = { ...out, to: next };
+        i++;
+      }
+      continue;
+    }
+    if (a.startsWith('--to=')) {
+      out = { ...out, to: a.slice('--to='.length) };
+      continue;
+    }
     if (a.startsWith('-')) continue; // ignore unknown flags
     const known: Command =
       a === 'connect' ||
@@ -151,6 +170,7 @@ export function parseArgs(argv: readonly string[]): ParsedArgs {
       a === 'discover' ||
       a === 'open' ||
       a === 'live' ||
+      a === 'find' ||
       a === 'handle' ||
       a === 'mcp' ||
       a === 'help'
@@ -160,7 +180,7 @@ export function parseArgs(argv: readonly string[]): ParsedArgs {
       out = { ...out, command: known };
     } else if (out.arg === undefined) {
       // First positional after the command → the command's argument
-      // (e.g. `handle @name`).
+      // (e.g. `handle @name`, `find @x`).
       out = { ...out, arg: a };
     }
   }
@@ -426,14 +446,22 @@ async function cmdOpen(port: number | undefined): Promise<number> {
  * `vibedating live [--dating]` — live text chat with same-league peers.
  *
  * Omegle by default (auto-pair; `/next` rolls a new peer). `--dating` advertises
- * pick-a-handle mode (`/open <handle>`). Consent-gated exactly like `discover`
- * (the command IS the opt-in). The wire protocol + pairing policy are unit
- * tested; this readline loop is manual-smoke only.
+ * pick-a-handle mode (`/open <handle>`). `--to <@handle>` is targeted: instead of
+ * pairing the first random peer, only auto-open the one whose handle matches.
+ * Consent-gated exactly like `discover` (the command IS the opt-in). The wire
+ * protocol + pairing policy are unit tested; this readline loop is manual-smoke
+ * only.
  */
-async function cmdLive(dating: boolean, any: boolean): Promise<number> {
+async function cmdLive(dating: boolean, any: boolean, to: string | undefined): Promise<number> {
   const profile = loadProfile();
   if (!profile) {
     process.stderr.write('Not connected yet. Run `vibedating connect` first.\n');
+    return 1;
+  }
+  // Validate a `--to` target up front so we fail fast on a bad handle.
+  const target = to !== undefined ? normalizeHandle(to) : null;
+  if (to !== undefined && target === null) {
+    process.stderr.write(`invalid target handle: ${to}\n`);
     return 1;
   }
   // The `live` command IS the opt-in (mirrors `discover --live`).
@@ -451,9 +479,11 @@ async function cmdLive(dating: boolean, any: boolean): Promise<number> {
   process.stdout.write('\n');
   process.stdout.write(`  ${LIVE_NOTICE}\n`);
   process.stdout.write(
-    dating
-      ? '  dating mode — /open <handle> to pick a peer\n'
-      : '  omegle mode — /next to roll a new peer\n',
+    target !== null
+      ? `  targeted — auto-opening ${target} when they connect (/quit to stop)\n`
+      : dating
+        ? '  dating mode — /open <handle> to pick a peer\n'
+        : '  omegle mode — /next to roll a new peer\n',
   );
 
   const pairing = createPairing();
@@ -476,7 +506,23 @@ async function cmdLive(dating: boolean, any: boolean): Promise<number> {
     hello,
     topics,
     acceptLeague,
-    onLink: (link) => pairing.add(link),
+    onLink: (link) => {
+      // Targeted (`--to`) mode: only pair the requested handle. Other peers are
+      // noted and politely declined (socket closed) so the session waits for the
+      // specific peer instead of auto-pairing the first random one.
+      if (target !== null && !sameHandle(link.hello.handle, target)) {
+        const { qual } = peerDirection(profile.league, link.hello.league);
+        process.stdout.write(
+          `  + ${link.hello.handle} (${link.hello.league}${qual}) — not your target\n`,
+        );
+        link.close();
+        return;
+      }
+      if (target !== null) {
+        process.stdout.write(`  ★ found ${link.hello.handle} — auto-opening\n`);
+      }
+      pairing.add(link);
+    },
   });
   process.stdout.write(
     `  topic: ${TOPIC_PREFIX}${profile.league} → ${session.topic.toString('hex').slice(0, 12)}…` +
@@ -526,13 +572,93 @@ async function cmdLive(dating: boolean, any: boolean): Promise<number> {
   return 0;
 }
 
+/**
+ * `vibedate find <@handle> [--any]` — targeted discovery, not omegle.
+ *
+ * Joins discovery on your league (+ adjacent, or --any for every league) and
+ * watches for ONE specific handle. When that peer connects it is highlighted
+ * (★ found); other peers are listed faintly. Reuses startDiscovery's onPeer and
+ * filters by handle via sameHandle() (leading '@' optional). If the target never
+ * shows up before Ctrl+C, says so. Consent-gated like every live command.
+ */
+async function cmdFind(targetArg: string | undefined, any: boolean): Promise<number> {
+  if (targetArg === undefined || targetArg.trim() === '') {
+    process.stderr.write('usage: vibedating find <@handle> [--any]\n');
+    return 1;
+  }
+  const target = normalizeHandle(targetArg);
+  if (target === null) {
+    process.stderr.write(`invalid handle: ${targetArg}\n`);
+    return 1;
+  }
+  const profile = loadProfile();
+  if (!profile) {
+    process.stderr.write('Not connected yet. Run `vibedating connect` first.\n');
+    return 1;
+  }
+  // The `find` command IS the opt-in (mirrors `discover --live`).
+  if (!canShareLive()) grantLiveConsent();
+  if (!canShareLive()) {
+    process.stderr.write('Could not enable live discovery. Try `vibedating discover --live`.\n');
+    return 1;
+  }
+
+  const hello: PeerHello = {
+    handle: resolveHandle(),
+    league: profile.league,
+    harness: profile.harness,
+  };
+  process.stdout.write('\n');
+  process.stdout.write(`  ${LIVE_NOTICE}\n`);
+  process.stdout.write(
+    `  looking for ${target} in your league${any ? ' (+ every league)' : ' + adjacent'}…\n`,
+  );
+
+  let found = false;
+  const { topics, acceptLeague } = discoveryScope(profile.league, any);
+  const session = await startDiscovery({
+    hello,
+    topics,
+    acceptLeague,
+    onPeer: (peer) => {
+      const { qual } = peerDirection(profile.league, peer.league);
+      if (sameHandle(peer.handle, target)) {
+        found = true;
+        process.stdout.write(`  ★ found ${peer.handle} (${peer.league}${qual} · ${peer.harness})\n`);
+      } else {
+        process.stdout.write(`  + ${peer.handle} (${peer.league}${qual}) — not your target\n`);
+      }
+    },
+  });
+  process.stdout.write(
+    `  topic: ${TOPIC_PREFIX}${profile.league} → ${session.topic.toString('hex').slice(0, 12)}…` +
+      `${topics.length > 1 ? ` (+${topics.length - 1} more)` : ''}\n`,
+  );
+  process.stdout.write('  (Ctrl+C to stop)\n\n');
+
+  // Run until interrupted; report whether the target was ever seen.
+  await new Promise<void>((resolve) => {
+    process.once('SIGINT', () => resolve());
+    process.once('SIGTERM', () => resolve());
+  });
+  process.stdout.write('\n  leaving the swarm…\n');
+  await session.close();
+  if (!found) {
+    process.stdout.write(`  ✗ ${target} was not found this session\n\n`);
+  } else {
+    process.stdout.write('\n');
+  }
+  return 0;
+}
+
 const HELP = `vibedating ${VERSION} — dating by tokens (local-first)
 
 Usage:
   vibedating connect            Read your usage, compute + print your league
   vibedating matches [--live]   List candidates in your league (live peers if any)
   vibedating discover [--live] [--any]  Find live peers over the DHT (your league + adjacent; --any = everyone)
-  vibedating live [--dating] [--any]    Live chat (your league + adjacent; --any = everyone; /next or --dating pick)
+  vibedating live [--dating] [--any] [--to @handle]  Live chat (your league + adjacent; --any = everyone; /next or --dating pick; --to targets one peer)
+  vibedating find <@handle> [--any]  Search the DHT for one specific handle (★ highlights a match)
   vibedating handle [@name]     Print or set your handle (persisted; a leading '@' is optional)
   vibedating open [--port N]    Serve the local web app (default: random port)
                                 + live A/V video with connected same-league peers
@@ -548,6 +674,7 @@ Privacy:
 Matching:
   discover/live match your league + adjacent (±1) tiers by default, so thin
   leagues and cross-league friends still connect. --any matches every league.
+  find / live --to look for one specific handle instead of the first random peer.
 
 Env:
   VIBEDATING_TOKENS=<n>   Self-report a token count (e.g. 23400000 or 12M)
@@ -576,7 +703,9 @@ async function main(argv: readonly string[]): Promise<number> {
     case 'open':
       return cmdOpen(parsed.port);
     case 'live':
-      return cmdLive(parsed.dating, parsed.any);
+      return cmdLive(parsed.dating, parsed.any, parsed.to);
+    case 'find':
+      return cmdFind(parsed.arg, parsed.any);
     case 'mcp':
       await runMcp();
       return 0;

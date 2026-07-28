@@ -3,11 +3,7 @@
  * in-process DHT (hyperdht's createTestnet — the public DHT is never touched).
  * They discover each other via a shared random topic, run the handshake both
  * ways, and each must end up with the other's { handle, league } in its peer
-<<<<<<< HEAD
- * set (and in its peers.json). A mismatch-league impostor must be dropped.
-=======
  * set (and in its peers.json). A mismatched-league impostor must be dropped.
->>>>>>> origin/p2p-matching
  */
 import { mkdtempSync, rmSync } from 'node:fs';
 import os from 'node:os';
@@ -22,9 +18,11 @@ import {
   type DiscoverySession,
   type PeerHello,
 } from './p2p.js';
+import { sameHandle } from './state.js';
 
 const ALICE: PeerHello = { handle: '@alice_10M', league: '10M', harness: 'claude-code' };
 const BOB: PeerHello = { handle: '@bob_10M', league: '10M', harness: 'codex' };
+const CAROL: PeerHello = { handle: '@carol_10M', league: '10M', harness: 'cursor' };
 
 async function waitFor(cond: () => boolean, timeoutMs: number): Promise<boolean> {
   const deadline = Date.now() + timeoutMs;
@@ -156,5 +154,38 @@ describe('live P2P discovery (in-process DHT, no public network)', () => {
       clearInterval(retry);
       await mallory.destroy();
     }
+  }, 30_000);
+
+  it('find flags exactly the target handle among several peers (sameHandle filter)', async () => {
+    // Mirrors `vibedate find <@handle>`: ALICE is the finder, BOB is the target,
+    // CAROL is a same-league decoy. ALICE's onPeer records every peer and flags
+    // the one whose handle matches the target (★) — the decoy is seen but never
+    // flagged.
+    const topic = randomTopic();
+    const target = BOB.handle; // '@bob_10M'
+    const seen = new Set<string>();
+
+    const alice = await startDiscovery({
+      hello: ALICE,
+      topic,
+      bootstrap: testnet.bootstrap,
+      stateDir: tmpDir(),
+      onPeer: (peer) => {
+        seen.add(peer.handle);
+        if (sameHandle(peer.handle, target)) seen.add('★' + peer.handle);
+      },
+    });
+    sessions.push(alice);
+    const bob = await spawn(BOB, topic);
+    const carol = await spawn(CAROL, topic);
+    await Promise.all([alice.ready, bob.ready, carol.ready]);
+
+    const ok = await waitFor(
+      () => seen.has(BOB.handle) && seen.has(CAROL.handle) && seen.has('★' + BOB.handle),
+      20_000,
+    );
+    expect(ok).toBe(true);
+    // The decoy was discovered but NOT flagged as the target.
+    expect(seen.has('★' + CAROL.handle)).toBe(false);
   }, 30_000);
 });
