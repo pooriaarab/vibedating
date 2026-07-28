@@ -10,6 +10,7 @@ export default defineConfig({
       ['**/media.integration.test.ts', 'forks'],
       ['**/signal.integration.test.ts', 'forks'],
       ['**/webrtc.integration.test.ts', 'forks'],
+      ['**/room.integration.test.ts', 'forks'],
     ],
   },
 });

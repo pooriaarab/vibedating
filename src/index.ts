@@ -317,6 +317,21 @@ export type {
   RelayTransport,
 } from './relay.js';
 
+/* Named rooms — multi-peer GROUP discovery (roster + broadcast chat + mesh
+   video signaling). A room is its own DHT topic, fully separate from the
+   1:1 league topics; consent-gated + reuses startDiscovery/PeerLink. */
+export {
+  ROOM_TOPIC_PREFIX,
+  roomTopic,
+  startRoom,
+} from './room.js';
+export type {
+  RoomMember,
+  RoomMessage,
+  RoomOptions,
+  RoomSession,
+} from './room.js';
+
 /* Persistent ed25519 identity: signs hellos so a handle can't be impersonated. */
 export {
   canonicalHelloClaims,
