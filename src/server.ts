@@ -29,6 +29,7 @@ import type { Candidate } from './index.js';
 import { CANDIDATES, matches, readUsage } from './index.js';
 import { parseFrame, type RtcFrame } from './frame.js';
 import type { PeerLink } from './link.js';
+import type { RoomMessage, RoomSession } from './room.js';
 import { connectProfile, loadProfile, type ProfileState } from './state.js';
 import { sanitizePeerText } from './untrusted.js';
 import { webAppHtml } from './web-app-html.js';
@@ -192,6 +193,169 @@ export function createLiveBridge(): LiveBridge {
   return bridge;
 }
 
+/* -------------------------------------------------------------------------- */
+/* Room bridge (browser <-> local server <-> RoomSession)                     */
+/* -------------------------------------------------------------------------- */
+
+/** Cap on queued rtc-* frames per member in a room bridge — beyond it the
+ *  OLDEST are dropped, so a chatty signaling peer can't grow memory unbounded
+ *  when the browser never polls. Mirrors {@link MAX_QUEUED_MESSAGES}. */
+const MAX_QUEUED_ROOM_SIGNALS = 200;
+
+/**
+ * Bridge between the browser and a multi-peer {@link RoomSession}.
+ *
+ * Mirrors {@link LiveBridge} but for rooms: the browser talks to the local
+ * server over HTTP (POST to send, long-poll to receive); the server relays each
+ * `rtc-*` frame to/from the matching member's PeerLink via
+ * {@link RoomSession.sendSignal} / {@link RoomSession.onSignal}, and relays group
+ * chat via {@link RoomSession.broadcast} / {@link RoomSession.onMessage}. Live
+ * MEDIA never touches the server — only SDP / ICE strings + text do.
+ *
+ * The bridge is a SYNCHRONOUS container (created with just the room name, before
+ * any session exists) so `cmdOpen` can serve the web app instantly and attach
+ * the room session in the background — exactly the pattern {@link createLiveBridge}
+ * + `addLink` use. Before {@link RoomBridge.attach}, broadcast/sendSignal no-op
+ * and polls queue waiters that fire once the session wires its callbacks.
+ */
+export interface RoomBridge {
+  /** The room name (set at construction, before any session is attached). */
+  readonly name: string;
+  /** The local member's handle (undefined until a session is attached). */
+  readonly self: string | undefined;
+  /** Snapshot of currently-connected room members. */
+  readonly members: readonly LivePeerInfo[];
+  /** Attach a freshly-started {@link RoomSession} (wires onMessage/onSignal). */
+  attach(session: RoomSession): void;
+  /** Broadcast one text to ALL room members (fan-out via the session). */
+  broadcast(text: string): void;
+  /** Long-poll for the next incoming group message (merged across members). */
+  pollMessage(timeoutMs: number): Promise<RoomMessage | null>;
+  /** Send one rtc-* signaling frame to the member identified by `handle`. */
+  sendSignal(handle: string, frame: RtcFrame): void;
+  /** Long-poll for the next incoming rtc-* frame from `handle`. */
+  pollSignal(handle: string, timeoutMs: number): Promise<RtcFrame | null>;
+}
+
+/** Build a {@link RoomBridge} for a named room. Holds no resources of its own;
+ *  callers attach a {@link RoomSession} via {@link RoomBridge.attach}. */
+export function createRoomBridge(name: string): RoomBridge {
+  // The session is attached later — before attach, broadcast/sendSignal no-op
+  // and polls queue waiters that fire once the session wires onMessage/onSignal.
+  let session: RoomSession | undefined;
+
+  const messageQueue: RoomMessage[] = [];
+  const messageWaiters: Array<(m: RoomMessage | null) => void> = [];
+  // Per-sender rtc-* frame queues (the mesh: each member is signaled by handle).
+  const signalBoxes = new Map<string, RtcFrame[]>();
+  const signalWaiters = new Map<string, Array<(f: RtcFrame | null) => void>>();
+
+  const drainMessage = (m: RoomMessage): void => {
+    // AEGIS-lite: peer text is UNTRUSTED display data — sanitized at ingress
+    // (the web app renders via textContent too — defense in depth), mirroring
+    // the LiveBridge.
+    const safe: RoomMessage = { ...m, text: sanitizePeerText(m.text) };
+    const waiter = messageWaiters.shift();
+    if (waiter !== undefined) {
+      waiter(safe);
+      return;
+    }
+    messageQueue.push(safe);
+    if (messageQueue.length > MAX_QUEUED_MESSAGES) {
+      messageQueue.splice(0, messageQueue.length - MAX_QUEUED_MESSAGES);
+    }
+  };
+
+  const drainSignal = (from: string, frame: RtcFrame): void => {
+    const waiters = signalWaiters.get(from);
+    if (waiters !== undefined && waiters.length > 0) {
+      const w = waiters.shift();
+      if (w !== undefined) {
+        if (waiters.length === 0) signalWaiters.delete(from);
+        w(frame);
+        return;
+      }
+    }
+    let box = signalBoxes.get(from);
+    if (box === undefined) {
+      box = [];
+      signalBoxes.set(from, box);
+    }
+    box.push(frame);
+    if (box.length > MAX_QUEUED_ROOM_SIGNALS) {
+      box.splice(0, box.length - MAX_QUEUED_ROOM_SIGNALS);
+    }
+  };
+
+  return {
+    name,
+    get self(): string | undefined {
+      return session?.hello.handle;
+    },
+    get members(): readonly LivePeerInfo[] {
+      if (session === undefined) return [];
+      // Built field-by-field from the hello — the browser gets exactly the
+      // display shape, never identity proof material (same as LiveBridge.peers).
+      return [...session.members.values()].map((h) => ({
+        handle: h.handle,
+        league: h.league,
+        harness: h.harness,
+        ...(h.verified !== undefined ? { verified: h.verified } : {}),
+        ...(h.identityVerified !== undefined ? { identityVerified: h.identityVerified } : {}),
+      }));
+    },
+    attach(s) {
+      session = s;
+      s.onMessage(drainMessage);
+      s.onSignal((from, frame) => drainSignal(from, frame));
+    },
+    broadcast(text) {
+      session?.broadcast(text);
+    },
+    async pollMessage(timeoutMs) {
+      if (messageQueue.length > 0) return messageQueue.shift() ?? null;
+      return new Promise<RoomMessage | null>((resolve) => {
+        const timer = setTimeout(() => {
+          const idx = messageWaiters.indexOf(resolve);
+          if (idx >= 0) messageWaiters.splice(idx, 1);
+          resolve(null);
+        }, timeoutMs);
+        messageWaiters.push((m) => {
+          clearTimeout(timer);
+          resolve(m);
+        });
+      });
+    },
+    sendSignal(handle, frame) {
+      session?.sendSignal(handle, frame);
+    },
+    async pollSignal(handle, timeoutMs) {
+      const box = signalBoxes.get(handle);
+      if (box !== undefined && box.length > 0) return box.shift() ?? null;
+      return new Promise<RtcFrame | null>((resolve) => {
+        const timer = setTimeout(() => {
+          const waiters = signalWaiters.get(handle);
+          if (waiters !== undefined) {
+            const idx = waiters.indexOf(resolve);
+            if (idx >= 0) waiters.splice(idx, 1);
+            if (waiters.length === 0) signalWaiters.delete(handle);
+          }
+          resolve(null);
+        }, timeoutMs);
+        let waiters = signalWaiters.get(handle);
+        if (waiters === undefined) {
+          waiters = [];
+          signalWaiters.set(handle, waiters);
+        }
+        waiters.push((f) => {
+          clearTimeout(timer);
+          resolve(f);
+        });
+      });
+    },
+  };
+}
+
 /** Shape served to the page. `totalTokens` is local-only by contract. */
 export interface ServerState {
   readonly connected: boolean;
@@ -221,6 +385,12 @@ export interface StartServerOptions {
    *  bridge's connected peers. Omit (tests) to keep the server a pure
    *  local-data server with no live routes active. */
   readonly live?: LiveBridge;
+  /** Optional room bridge. When set, the server exposes `/api/room`,
+   *  `/room/message` (group chat broadcast + merged long-poll) and `/room/signal`
+   *  (per-handle WebRTC signaling for full-mesh video) so the web app can render
+   *  the room view. Mutually exclusive with {@link live} in practice (cmdOpen
+   *  attaches one or the other). */
+  readonly room?: RoomBridge;
 }
 
 export interface StartedServer {
@@ -506,6 +676,129 @@ async function handle(
       return;
     }
     live.sendMessage(handle, reParsed.text);
+    sendJson(res, 200, { ok: true });
+    return;
+  }
+
+  // ---- Room routes (active only when a RoomBridge is attached) ----
+  // Group chat + full-mesh WebRTC signaling for named rooms. The signaling
+  // relay mirrors /live/signal exactly (re-parse every claimed frame through
+  // parseFrame's allowlist before it reaches a PeerLink); group chat is a
+  // broadcast (fan-out to every member) with a single MERGED long-poll for
+  // incoming messages from anyone.
+
+  // GET /api/room  -> { room, self, members } when a room is attached, else
+  // { room: null, members: [] }. The web app uses this to decide whether to
+  // render the room view.
+  if (req.method === 'GET' && pathname === '/api/room') {
+    const room = opts.room;
+    sendJson(res, 200, room
+      ? { room: room.name, self: room.self ?? null, members: room.members }
+      : { room: null, self: null, members: [] });
+    return;
+  }
+
+  // GET /room/message  — long-poll for the next incoming group message from
+  // ANY member (merged). Returns {message} (a RoomMessage: from/id/text/at) or
+  // {message: null} on timeout. One poll loop drives the whole room chat.
+  if (req.method === 'GET' && pathname === '/room/message') {
+    const room = opts.room;
+    if (!room) {
+      sendJson(res, 200, { message: null, reason: 'room-not-attached' });
+      return;
+    }
+    const message = await room.pollMessage(25_000);
+    if (req.destroyed || res.writableEnded) return;
+    sendJson(res, 200, { message });
+    return;
+  }
+
+  // POST /room/message  {text}  — broadcast one text to ALL room members. The
+  // text is round-tripped through parseFrame's allowlist as a real `msg` frame
+  // BEFORE it reaches the wire — the same defense-in-depth as POST /live/message.
+  if (req.method === 'POST' && pathname === '/room/message') {
+    const room = opts.room;
+    if (!room) {
+      sendJson(res, 400, { error: 'room-not-attached' });
+      return;
+    }
+    const body = await readBody(req);
+    let parsed: Record<string, unknown> = {};
+    try {
+      parsed = JSON.parse(body) as Record<string, unknown>;
+    } catch {
+      sendJson(res, 400, { error: 'invalid JSON body' });
+      return;
+    }
+    const text = parsed['text'];
+    if (typeof text !== 'string') {
+      sendJson(res, 400, { error: 'missing text' });
+      return;
+    }
+    const reParsed = parseFrame(
+      JSON.stringify({ t: 'msg', id: randomUUID(), text, at: Date.now() }),
+    );
+    if (reParsed === null || reParsed.t !== 'msg') {
+      sendJson(res, 400, { error: 'invalid message text' });
+      return;
+    }
+    room.broadcast(reParsed.text);
+    sendJson(res, 200, { ok: true });
+    return;
+  }
+
+  // GET /room/signal?handle=<memberHandle>  — long-poll for the next incoming
+  // rtc-* frame from that member (full-mesh: one poll per member). Returns
+  // {frame} or {frame: null} on timeout.
+  if (req.method === 'GET' && pathname === '/room/signal') {
+    const room = opts.room;
+    if (!room) {
+      sendJson(res, 200, { frame: null, reason: 'room-not-attached' });
+      return;
+    }
+    const handle = url.searchParams.get('handle') ?? '';
+    if (handle === '') {
+      sendJson(res, 400, { error: 'missing handle' });
+      return;
+    }
+    const frame = await room.pollSignal(handle, 25_000);
+    if (req.destroyed || res.writableEnded) return;
+    sendJson(res, 200, { frame });
+    return;
+  }
+
+  // POST /room/signal  {handle, frame}  — relay one rtc-* frame from the
+  // browser to one member's PeerLink. Re-parsed through parseFrame's allowlist
+  // so a browser can NEVER smuggle extra keys / oversized payloads onto the
+  // P2P wire (same guard as POST /live/signal).
+  if (req.method === 'POST' && pathname === '/room/signal') {
+    const room = opts.room;
+    if (!room) {
+      sendJson(res, 400, { error: 'room-not-attached' });
+      return;
+    }
+    const body = await readBody(req);
+    let parsed: Record<string, unknown> = {};
+    try {
+      parsed = JSON.parse(body) as Record<string, unknown>;
+    } catch {
+      sendJson(res, 400, { error: 'invalid JSON body' });
+      return;
+    }
+    const handle = typeof parsed['handle'] === 'string' ? parsed['handle'] : '';
+    if (handle === '') {
+      sendJson(res, 400, { error: 'missing handle' });
+      return;
+    }
+    const reParsed = parseFrame(JSON.stringify(parsed['frame']));
+    if (
+      reParsed === null ||
+      (reParsed.t !== 'rtc-offer' && reParsed.t !== 'rtc-answer' && reParsed.t !== 'rtc-ice')
+    ) {
+      sendJson(res, 400, { error: 'invalid rtc frame' });
+      return;
+    }
+    room.sendSignal(handle, reParsed);
     sendJson(res, 200, { ok: true });
     return;
   }
