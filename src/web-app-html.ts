@@ -440,6 +440,24 @@ export const webAppHtml = `<!DOCTYPE html>
     background: var(--danger); color: #2a0a0c;
   }
   .video-modal .vhangup:hover{ filter: brightness(1.06); }
+  .live-panel .lp-legend{ font-size: .66rem; color: var(--muted-2); margin-top: 8px; line-height: 1.4; }
+  .incoming-call{
+    position: fixed; inset: 0; z-index: 65;
+    display: flex; align-items: center; justify-content: center;
+    background: rgba(12,7,15,.6); backdrop-filter: blur(6px); -webkit-backdrop-filter: blur(6px);
+    opacity: 0; pointer-events: none; transition: opacity var(--dur-med) ease;
+  }
+  .incoming-call.is-open{ opacity: 1; pointer-events: auto; }
+  .incoming-call .ic-card{
+    background: linear-gradient(165deg, var(--bg-card), var(--bg-card-2));
+    border: 1px solid var(--border-2); border-radius: 24px; box-shadow: var(--shadow-3);
+    padding: 30px 28px; max-width: 320px; text-align: center;
+    transform: scale(.85) translateY(10px); transition: transform var(--dur-med) var(--ease-bounce);
+  }
+  .incoming-call.is-open .ic-card{ transform: scale(1) translateY(0); }
+  .incoming-call h3{ margin: 0 0 6px; font-size: 1.15rem; font-weight: 800; word-break: break-all; }
+  .incoming-call p{ color: var(--muted); font-size: .85rem; margin: 0 0 18px; }
+  .incoming-call .ic-actions{ display: flex; gap: 10px; }
 </style>
 </head>
 <body>
@@ -584,10 +602,22 @@ export const webAppHtml = `<!DOCTYPE html>
   </div>
 </div>
 
-<aside class="live-panel" id="livePanel" aria-label="Live same-league peers">
-  <div class="lp-title"><span class="lp-dot" aria-hidden="true"></span> Live same-league peers</div>
+<aside class="live-panel" id="livePanel" aria-label="Live peers">
+  <div class="lp-title"><span class="lp-dot" aria-hidden="true"></span> Live peers</div>
   <div id="liveRows"></div>
+  <div class="lp-legend">&#10003; usage verified &middot; &#128273; identity verified &mdash; call someone, or wait for a call</div>
 </aside>
+
+<div class="incoming-call" id="incomingCall" role="dialog" aria-modal="true" aria-label="Incoming call">
+  <div class="ic-card">
+    <h3 id="incomingCaller">@peer</h3>
+    <p>is calling you &mdash; video chat</p>
+    <div class="ic-actions">
+      <button class="btn btn-ghost" id="declineBtn" type="button">Decline</button>
+      <button class="btn btn-primary" id="acceptBtn" type="button">Accept</button>
+    </div>
+  </div>
+</div>
 
 <div class="video-modal" id="videoModal" role="dialog" aria-modal="true" aria-label="Video call">
   <div class="vtile"><video id="remoteVideo" autoplay playsinline></video><div class="vlabel" id="remoteLabel">remote</div></div>
@@ -893,9 +923,15 @@ export const webAppHtml = `<!DOCTYPE html>
   var remoteVideo = document.getElementById("remoteVideo");
   var remoteLabel = document.getElementById("remoteLabel");
   var hangupBtn = document.getElementById("hangupBtn");
+  var incomingCallEl = document.getElementById("incomingCall");
+  var incomingCaller = document.getElementById("incomingCaller");
+  var acceptBtn = document.getElementById("acceptBtn");
+  var declineBtn = document.getElementById("declineBtn");
 
   // One in-flight call's state. remoteHandle === null means idle.
   var rtc = { pc: null, localStream: null, remoteHandle: null, role: null };
+  // An incoming offer awaiting the user's accept/decline (never auto-answered).
+  var pendingOffer = null;
   var knownPeers = [];
   var idleIdx = 0;
 
@@ -1012,7 +1048,8 @@ export const webAppHtml = `<!DOCTYPE html>
   }
 
   // Idle listener: when not in a call, watch known peers round-robin so an
-  // incoming offer (the peer clicked THEIR Video button) is noticed and answered.
+  // incoming offer (the peer clicked THEIR Call button) is noticed. Offers are
+  // never auto-answered — the caller is named and the user accepts or declines.
   async function idleLoop(){
     while (true) {
       if (rtc.remoteHandle || knownPeers.length === 0) { await sleep(1000); continue; }
@@ -1024,13 +1061,34 @@ export const webAppHtml = `<!DOCTYPE html>
           var data = await res.json();
           var f = data && data.frame;
           if (f && f.t === "rtc-offer" && !rtc.pc && !rtc.remoteHandle) {
-            await answerIncomingOffer(peer.handle, f.sdp);
+            // One prompt at a time: a re-offer from the SAME caller refreshes
+            // the stored sdp; an offer from someone else while a prompt is up
+            // is dropped (their call simply fails to connect).
+            if (pendingOffer && pendingOffer.handle !== peer.handle) continue;
+            pendingOffer = { handle: peer.handle, sdp: f.sdp };
+            showIncomingPrompt(peer.handle);
           }
         }
       } catch(e){ /* abort/timeout — loop to next peer */ }
     }
   }
   idleLoop();
+
+  function showIncomingPrompt(handle){
+    incomingCaller.textContent = handle;
+    incomingCallEl.classList.add("is-open");
+  }
+  function clearIncomingPrompt(){
+    pendingOffer = null;
+    incomingCallEl.classList.remove("is-open");
+  }
+  acceptBtn.addEventListener("click", function(){
+    var p = pendingOffer;
+    clearIncomingPrompt();
+    if (!p) return;
+    answerIncomingOffer(p.handle, p.sdp).catch(function(){ hangup(); });
+  });
+  declineBtn.addEventListener("click", clearIncomingPrompt);
 
   function hangup(){
     try { if (rtc.pc) rtc.pc.close(); } catch(e){}
@@ -1047,7 +1105,8 @@ export const webAppHtml = `<!DOCTYPE html>
   }
   hangupBtn.addEventListener("click", hangup);
 
-  // Render the live-peers panel with a Video button each.
+  // Render the live-peers panel: one row per connected peer with its
+  // verification marks and a Call button that rings THAT peer specifically.
   async function refreshPeers(){
     try {
       var res = await fetch("/api/live/peers");
@@ -1062,15 +1121,19 @@ export const webAppHtml = `<!DOCTYPE html>
         var row = document.createElement("div");
         row.className = "live-row";
         var who = document.createElement("div");
-        var h = document.createElement("div"); h.className = "h"; h.textContent = p.handle;
+        // Marks from the peer's hello, shown only when present: ✓ usage
+        // verified (real local logs), 🔑 identity-verified (signed hello).
+        var marks = (p.verified === true ? " ✓" : "") + (p.identityVerified === true ? " 🔑" : "");
+        var h = document.createElement("div"); h.className = "h"; h.textContent = p.handle + marks;
         var s = document.createElement("div"); s.className = "s"; s.textContent = p.league + " \u00b7 " + p.harness;
         who.appendChild(h); who.appendChild(s);
         var btn = document.createElement("button");
-        btn.className = "vbtn"; btn.type = "button"; btn.textContent = "Video";
+        btn.className = "vbtn"; btn.type = "button"; btn.textContent = "Call";
         btn.addEventListener("click", function(){
-          if (rtc.remoteHandle) return; // already in a call
+          if (rtc.remoteHandle || pendingOffer) return; // already in a call / prompt
           btn.disabled = true;
-          startCallAsOfferer(p.handle).catch(function(){ btn.disabled = false; });
+          // DIRECTED call: the rtc-offer is relayed only to this peer's handle.
+          startCallAsOfferer(p.handle).catch(function(){ hangup(); });
         });
         row.appendChild(who); row.appendChild(btn);
         liveRows.appendChild(row);

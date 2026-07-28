@@ -38,6 +38,10 @@ export interface LivePeerInfo {
   readonly handle: string;
   readonly league: string;
   readonly harness: string;
+  /** Self-asserted usage-verification flag from the peer's hello (✓ in the UI). */
+  readonly verified?: boolean;
+  /** LOCAL-derived: the peer's hello signature verified against its key (🔑). */
+  readonly identityVerified?: boolean;
 }
 
 /**
@@ -75,7 +79,19 @@ export function createLiveBridge(): LiveBridge {
 
   const bridge: LiveBridge = {
     get peers(): readonly LivePeerInfo[] {
-      return [...boxes.values()].map((m) => m.link.hello);
+      // Built field-by-field from the hello — the browser gets exactly the
+      // display shape (handle + league + harness + the two verification marks),
+      // never identity proof material (pubkey) or anything else the link holds.
+      return [...boxes.values()].map((m) => {
+        const h = m.link.hello;
+        return {
+          handle: h.handle,
+          league: h.league,
+          harness: h.harness,
+          ...(h.verified !== undefined ? { verified: h.verified } : {}),
+          ...(h.identityVerified !== undefined ? { identityVerified: h.identityVerified } : {}),
+        };
+      });
     },
     addLink(link) {
       const handle = link.hello.handle;

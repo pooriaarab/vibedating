@@ -6,12 +6,14 @@ import type { VibeEvent } from '@pooriaarab/vibe-core';
 import { CANDIDATES } from './index.js';
 import type { RtcFrame } from './frame.js';
 import {
+  createLiveBridge,
   startServer,
   type LiveBridge,
   type LivePeerInfo,
   type StartedServer,
   type StartServerOptions,
 } from './server.js';
+import type { PeerLink } from './link.js';
 
 // Hermetic state dir so the test never touches ~/.vibedating.
 const tmpDir = mkdtempSync(path.join(os.tmpdir(), 'vibedating-test-'));
@@ -241,6 +243,45 @@ describe('live A/V signaling bridge (/api/live/peers, /live/signal)', () => {
       },
       { live: bridge },
     );
+  });
+
+  it('GET /api/live/peers carries the verification marks when present', async () => {
+    const bridge = fakeBridge([
+      { handle: '@bob', league: '10M', harness: 'codex', verified: true, identityVerified: true },
+      { handle: '@legacy', league: '5M', harness: 'claude-code' },
+    ]);
+    await withServer(
+      async ({ url }) => {
+        const json = (await (await fetch(`${url}/api/live/peers`)).json()) as {
+          peers: LivePeerInfo[];
+        };
+        expect(json.peers).toEqual([
+          { handle: '@bob', league: '10M', harness: 'codex', verified: true, identityVerified: true },
+          { handle: '@legacy', league: '5M', harness: 'claude-code' },
+        ]);
+      },
+      { live: bridge },
+    );
+  });
+
+  it('createLiveBridge maps each hello to the display shape — marks kept, pubkey dropped', () => {
+    const bridge = createLiveBridge();
+    const fakeLink = {
+      hello: {
+        handle: '@z',
+        league: '5M',
+        harness: 'codex',
+        verified: true,
+        identityVerified: true,
+        pubkey: 'ab'.repeat(32),
+      },
+      onSignal() {},
+      onClose() {},
+    } as unknown as PeerLink;
+    bridge.addLink(fakeLink);
+    expect(bridge.peers).toEqual([
+      { handle: '@z', league: '5M', harness: 'codex', verified: true, identityVerified: true },
+    ]);
   });
 
   it('POST /live/signal relays a valid rtc-offer to the bridge', async () => {
