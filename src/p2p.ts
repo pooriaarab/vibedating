@@ -181,9 +181,24 @@ export interface DiscoveryOptions {
   readonly hello: PeerHello;
   /**
    * Override the joined topic (tests pass a random one on an isolated DHT).
-   * Defaults to {@link leagueTopic}`(hello.league)`.
+   * Defaults to {@link leagueTopic}`(hello.league)`. Ignored when {@link topics}
+   * is set.
    */
   readonly topic?: Buffer;
+  /**
+   * ALL topics to join on the one swarm (e.g. your league + adjacent leagues),
+   * so thin pools and cross-league friends still connect. Every topic is
+   * joined, refreshed, and left on close. Defaults to `[topic]` — i.e. a single
+   * own-league topic (the legacy behavior).
+   */
+  readonly topics?: readonly Buffer[];
+  /**
+   * Predicate over an incoming peer's advertised league. Defaults to EXACT
+   * match against `hello.league` — the same privacy invariant as before. Widen
+   * it (e.g. ±1 adjacency via {@link leaguesWithin}) to accept cross-league
+   * peers that arrive on a shared topic.
+   */
+  readonly acceptLeague?: (peerLeague: string) => boolean;
   /** DHT bootstrap nodes; omit for the public DHT. Tests pass a local testnet. */
   readonly bootstrap?: ReadonlyArray<{ readonly host: string; readonly port: number }>;
   /** Where peers.json lives. Defaults to ~/.vibedating. */
@@ -202,15 +217,17 @@ export interface DiscoveryOptions {
 }
 
 export interface DiscoverySession {
-  /** The 32-byte topic actually joined. */
+  /** The primary (first) joined topic. See {@link topics} for the full set. */
   readonly topic: Buffer;
+  /** Every topic this session joined (primary first). */
+  readonly topics: readonly Buffer[];
   /** What we broadcast on every connection. */
   readonly hello: PeerHello;
   /** Live peer set, keyed by the remote's public key (hex). */
   readonly peers: ReadonlyMap<string, PeerHello>;
-  /** Resolves when the first DHT announce/lookup round for the topic completes. */
+  /** Resolves when the first DHT announce/lookup round for every topic completes. */
   readonly ready: Promise<unknown>;
-  /** Leave the topic and destroy the node. Idempotent. */
+  /** Leave every topic and destroy the node. Idempotent. */
   close(): Promise<void>;
 }
 
@@ -221,7 +238,17 @@ export interface DiscoverySession {
  */
 export async function startDiscovery(opts: DiscoveryOptions): Promise<DiscoverySession> {
   const { hello, stateDir = defaultStateDir(), onPeer, onLink, notify = vibeCoreNotify } = opts;
-  const topic = opts.topic ?? leagueTopic(hello.league);
+  // Topics: explicit list (preferred) > single legacy `topic` > own-league default.
+  const topics: Buffer[] = opts.topics
+    ? [...opts.topics]
+    : opts.topic !== undefined
+      ? [opts.topic]
+      : [leagueTopic(hello.league)];
+  // League-accept predicate: default = EXACT own-league match, so the legacy
+  // privacy invariant (only same-league peers are retained) is unchanged
+  // unless a caller widens it (e.g. CLI default ±1, or `--any`).
+  const acceptLeague: (peerLeague: string) => boolean =
+    opts.acceptLeague ?? ((l) => l === hello.league);
 
   // Imported lazily so non-live commands (`matches`, `mcp`, `--help`) never pay
   // for hyperswarm's native stack (udx/sodium) — it loads on first live use.
@@ -270,9 +297,11 @@ export async function startDiscovery(opts: DiscoveryOptions): Promise<DiscoveryS
           league: frame.league,
           harness: frame.harness,
         };
-        // The topic already restricts us to one league; a peer claiming a
-        // different league on it is bogus — drop it.
-        if (peer.league !== hello.league) continue;
+        // The joined topic(s) scope which peers can reach us, but a peer could
+        // still arrive on a shared topic advertising a league we don't accept
+        // — drop it. `acceptLeague` defaults to EXACT own-league match, so the
+        // legacy privacy invariant is unchanged unless a caller widens it.
+        if (!acceptLeague(peer.league)) continue;
         peers.set(remoteKey, peer);
         const { isNew } = recordPeer(peer, stateDir);
         if (isNew) {
@@ -312,12 +341,17 @@ export async function startDiscovery(opts: DiscoveryOptions): Promise<DiscoveryS
     });
   });
 
-  const discovery = swarm.join(topic, { server: true, client: true });
+  // Join EVERY topic on the one swarm (e.g. your league + adjacent leagues).
+  // Each join returns its own discovery handle; refresh + leave them all below.
+  const discoveries = topics.map((t) => swarm.join(t, { server: true, client: true }));
 
-  // Await the first announce/lookup round before returning: once it completes,
-  // our record is stored on the DHT, so a peer joining AFTER us finds us in
-  // its first round. A failed first round is retried by the refresher below.
-  const ready: Promise<unknown> = discovery.flushed().catch(() => undefined);
+  // Await the first announce/lookup round on EVERY topic before returning:
+  // once they complete, our records are stored on the DHT, so a peer joining
+  // AFTER us finds us in its first round. A failed first round is retried by
+  // the refresher below.
+  const ready: Promise<unknown> = Promise.all(
+    discoveries.map((d) => d.flushed().catch(() => undefined)),
+  );
   await ready;
 
   // hyperswarm re-refreshes a topic only every ~10 minutes — fine for a
@@ -326,13 +360,14 @@ export async function startDiscovery(opts: DiscoveryOptions): Promise<DiscoveryS
   // missed or errored (the swarm swallows round errors) must not cost the
   // whole session. Re-run rounds on a short cadence until close().
   const refresher = setInterval(() => {
-    void discovery.refresh({ server: true, client: true }).catch(() => {});
+    for (const d of discoveries) void d.refresh({ server: true, client: true }).catch(() => {});
   }, REFRESH_INTERVAL_MS);
   refresher.unref();
 
   let closed = false;
   return {
-    topic,
+    topic: topics[0]!, // primary (first) — kept for back-compat / display
+    topics, // every joined topic (primary first)
     hello,
     peers,
     ready,
@@ -340,10 +375,12 @@ export async function startDiscovery(opts: DiscoveryOptions): Promise<DiscoveryS
       if (closed) return;
       closed = true;
       clearInterval(refresher);
-      try {
-        await swarm.leave(topic);
-      } catch {
-        /* network already gone */
+      for (const t of topics) {
+        try {
+          await swarm.leave(t);
+        } catch {
+          /* network already gone */
+        }
       }
       await swarm.destroy();
     },

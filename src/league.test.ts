@@ -1,10 +1,12 @@
 import { describe, expect, it } from 'vitest';
 import {
+  allLeagueNames,
   BELOW_LEAGUE,
   DEMO_TOTAL_TOKENS,
   LEAGUES,
   league,
   leagueIndex,
+  leaguesWithin,
   parseTokensEnv,
 } from './index.js';
 
@@ -110,5 +112,59 @@ describe('parseTokensEnv', () => {
 describe('demo default lands in a real league', () => {
   it('DEMO_TOTAL_TOKENS is in the 10M league (non-empty demo pool)', () => {
     expect(league(DEMO_TOTAL_TOKENS).name).toBe('10M');
+  });
+});
+
+describe('leaguesWithin', () => {
+  it('middle league ±1 → 3 names (self + both neighbors)', () => {
+    expect(leaguesWithin('10M', 1)).toEqual(['5M', '10M', '100M']);
+  });
+
+  it('bottom-edge league ±1 → 2 names (clamped at the bottom)', () => {
+    expect(leaguesWithin('1M', 1)).toEqual(['1M', '5M']);
+  });
+
+  it('top-edge league ±1 → 2 names (clamped at the top)', () => {
+    expect(leaguesWithin('1B+', 1)).toEqual(['100M', '1B+']);
+  });
+
+  it('width 0 → self only', () => {
+    expect(leaguesWithin('10M', 0)).toEqual(['10M']);
+    expect(leaguesWithin('1M', 0)).toEqual(['1M']);
+    expect(leaguesWithin('1B+', 0)).toEqual(['1B+']);
+  });
+
+  it('width ≥ ladder size → whole ladder (clamped to bounds)', () => {
+    expect(leaguesWithin('10M', 100)).toEqual(['1M', '5M', '10M', '100M', '1B+']);
+    expect(leaguesWithin('1M', 100)).toEqual(['1M', '5M', '10M', '100M', '1B+']);
+  });
+
+  it('below-1M (index -1) is adjacent only upward into the 1M tier', () => {
+    expect(leaguesWithin(BELOW_LEAGUE, 0)).toEqual([BELOW_LEAGUE]);
+    expect(leaguesWithin(BELOW_LEAGUE, 1)).toEqual([BELOW_LEAGUE, '1M']);
+    expect(leaguesWithin(BELOW_LEAGUE, 2)).toEqual([BELOW_LEAGUE, '1M', '5M']);
+  });
+
+  it('unknown league name → empty (no neighborhood)', () => {
+    expect(leaguesWithin('nope', 1)).toEqual([]);
+    expect(leaguesWithin('', 1)).toEqual([]);
+  });
+
+  it('negative width is clamped to 0 (self only)', () => {
+    expect(leaguesWithin('10M', -3)).toEqual(['10M']);
+  });
+
+  it('is pure: same args → same result', () => {
+    expect(leaguesWithin('10M', 1)).toEqual(leaguesWithin('10M', 1));
+  });
+});
+
+describe('allLeagueNames', () => {
+  it('returns below-1M + every LEAGUES name, ascending', () => {
+    expect(allLeagueNames()).toEqual([BELOW_LEAGUE, '1M', '5M', '10M', '100M', '1B+']);
+  });
+
+  it('has exactly one more entry than LEAGUES (the below-1M tier)', () => {
+    expect(allLeagueNames()).toHaveLength(LEAGUES.length + 1);
   });
 });
