@@ -189,6 +189,28 @@ describe('parseArgs — find command + live --to flag', () => {
   });
 });
 
+describe('parseArgs — block / unblock / blocklist commands', () => {
+  it('recognizes each subcommand', () => {
+    expect(parseArgs(['block']).command).toBe('block');
+    expect(parseArgs(['unblock']).command).toBe('unblock');
+    expect(parseArgs(['blocklist']).command).toBe('blocklist');
+  });
+
+  it('block / unblock capture the target handle as arg', () => {
+    expect(parseArgs(['block', '@spammer']).arg).toBe('@spammer');
+    expect(parseArgs(['unblock', '@spammer']).arg).toBe('@spammer');
+  });
+
+  it('blocklist takes no arg', () => {
+    expect(parseArgs(['blocklist']).arg).toBeUndefined();
+  });
+
+  it('block / unblock with no arg → arg undefined', () => {
+    expect(parseArgs(['block']).arg).toBeUndefined();
+    expect(parseArgs(['unblock']).arg).toBeUndefined();
+  });
+});
+
 describe('parseArgs — --any flag', () => {
   it('defaults to false', () => {
     expect(parseArgs(['discover']).any).toBe(false);

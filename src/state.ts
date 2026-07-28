@@ -241,3 +241,91 @@ export function resolveHandle(dir: string = defaultStateDir()): string {
   }
   return loadHandle(dir);
 }
+
+/* -------------------------------------------------------------------------- */
+/* Blocklist                                                                  */
+/* -------------------------------------------------------------------------- */
+
+/** File under the state dir holding the blocklist (canonical '@'-prefixed). */
+const BLOCKLIST_FILE = 'blocklist.json';
+
+function blocklistPath(dir: string): string {
+  return path.join(dir, BLOCKLIST_FILE);
+}
+
+function persistBlocklist(blocked: readonly string[], dir: string): void {
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(blocklistPath(dir), JSON.stringify({ blocked }, null, 2) + '\n', 'utf8');
+}
+
+/** Load the persisted blocklist (canonical '@'-prefixed handles), or `[]`. */
+export function loadBlocklist(dir: string = defaultStateDir()): string[] {
+  try {
+    const raw = readFileSync(blocklistPath(dir), 'utf8');
+    const data = JSON.parse(raw) as { blocked?: unknown };
+    if (!Array.isArray(data['blocked'])) return [];
+    return data['blocked'].filter((h): h is string => typeof h === 'string');
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Whether `handle` is on the blocklist. Lenient: never throws, and compares
+ * with a leading '@' stripped on both sides so `@x` and `x` match. An empty
+ * handle is never blocked. Backed by {@link loadBlocklist}.
+ */
+export function isBlocked(handle: string, dir: string = defaultStateDir()): boolean {
+  const want = stripLeadingAt(handle);
+  if (want === '') return false;
+  return loadBlocklist(dir).some((entry) => stripLeadingAt(entry) === want);
+}
+
+/** Result of {@link addBlock} / {@link removeBlock}: the new list + a flag. */
+export interface BlocklistChange {
+  readonly blocked: string[];
+  /** `true` when this call actually changed the list (not already present/absent). */
+  readonly changed: boolean;
+}
+
+/**
+ * Validate + add a handle to the blocklist (idempotent). Returns the new list
+ * and whether this call actually added it. Throws on an invalid handle.
+ */
+export function addBlock(
+  handle: string,
+  dir: string = defaultStateDir(),
+): BlocklistChange {
+  const canonical = normalizeHandle(handle);
+  if (canonical === null) {
+    throw new Error(
+      `invalid handle: use 1-${MAX_HANDLE_LEN} chars (optional leading '@'), no whitespace`,
+    );
+  }
+  const list = loadBlocklist(dir);
+  if (list.some((e) => sameHandle(e, canonical))) return { blocked: list, changed: false };
+  const blocked = [...list, canonical];
+  persistBlocklist(blocked, dir);
+  return { blocked, changed: true };
+}
+
+/**
+ * Remove a handle from the blocklist (idempotent). Returns the new list and
+ * whether this call actually removed it. Throws on an invalid handle.
+ */
+export function removeBlock(
+  handle: string,
+  dir: string = defaultStateDir(),
+): BlocklistChange {
+  const canonical = normalizeHandle(handle);
+  if (canonical === null) {
+    throw new Error(
+      `invalid handle: use 1-${MAX_HANDLE_LEN} chars (optional leading '@'), no whitespace`,
+    );
+  }
+  const list = loadBlocklist(dir);
+  const blocked = list.filter((e) => !sameHandle(e, canonical));
+  if (blocked.length === list.length) return { blocked: list, changed: false };
+  persistBlocklist(blocked, dir);
+  return { blocked, changed: true };
+}
