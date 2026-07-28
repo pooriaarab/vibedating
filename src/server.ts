@@ -7,6 +7,11 @@
  *   POST /api/connect  -> read usage, compute + store league, return new state
  *   POST /api/match    -> confirm a same-league match with a candidate; on
  *                         confirmation fires ONE best-effort vibenotify event
+ *   GET  /api/live/peers  -> connected live peers (with verification marks)
+ *   GET|POST /live/signal -> WebRTC signaling relay (rtc-offer/answer/ice)
+ *   GET|POST /live/message -> text chat relay (`msg` frames)
+ *                         (the live routes are active only when a LiveBridge is
+ *                         attached — see StartServerOptions.live)
  *
  * Raw token usage appears in /api/state so the local page can show it behind an
  * opt-in toggle. It is never sent anywhere off-machine (there is no off-machine).
@@ -17,6 +22,7 @@
  * defaults to vibe-core's `notify` (~/.vibe/notify.jsonl).
  */
 import http, { type IncomingMessage, type Server, type ServerResponse } from 'node:http';
+import { randomUUID } from 'node:crypto';
 import { makeEvent, notify as vibeCoreNotify } from '@pooriaarab/vibe-core';
 import type { VibeEvent } from '@pooriaarab/vibe-core';
 import type { Candidate } from './index.js';
@@ -45,6 +51,17 @@ export interface LivePeerInfo {
 }
 
 /**
+ * One text chat message relayed to/from a peer — the payload of a `msg` frame
+ * (see frame.ts). `id`/`at` are minted by the SENDER, never by the browser:
+ * the browser posts only {handle, text} (see POST /live/message).
+ */
+export interface LiveMessage {
+  readonly id: string;
+  readonly text: string;
+  readonly at: number;
+}
+
+/**
  * Bridge between the browser's WebRTC stack and the P2P {@link PeerLink}s.
  *
  * The browser talks to the local server over HTTP (POST to send, long-poll to
@@ -53,6 +70,10 @@ export interface LivePeerInfo {
  * MEDIA never touches the server — only SDP / ICE strings do. The server is a
  * pure signaling relay; the real RTCPeerConnection lives in the browser, so no
  * native WebRTC dependency is pulled into the CLI.
+ *
+ * Text chat rides the same bridge: each peer's `msg` frames queue in a
+ * per-peer mailbox (drained by the browser's long-poll), and outbound texts go
+ * through {@link PeerLink.send}.
  */
 export interface LiveBridge {
   /** Snapshot of currently-connected live peers. */
@@ -64,13 +85,27 @@ export interface LiveBridge {
   /** Long-poll for the next incoming rtc-* frame from `handle`. Resolves with
    *  the frame, or null on timeout / when the peer is unknown. */
   pollSignal(handle: string, timeoutMs: number): Promise<RtcFrame | null>;
+  /** Send one text message (`msg` frame) to the peer identified by `handle`. */
+  sendMessage(handle: string, text: string): void;
+  /** Long-poll for the next incoming text message from `handle`. Resolves with
+   *  the message, or null on timeout / when the peer is unknown. */
+  pollMessage(handle: string, timeoutMs: number): Promise<LiveMessage | null>;
 }
 
 interface PeerMailbox {
   readonly link: PeerLink;
   /** Incoming rtc-* frames from this peer, drained by the browser long-poll. */
   readonly incoming: RtcFrame[];
+  /** Incoming text messages from this peer, drained by the browser long-poll. */
+  readonly messages: LiveMessage[];
 }
+
+/**
+ * Cap on queued incoming messages per peer — beyond it the OLDEST are dropped.
+ * A chatty peer can't grow memory without bound when the browser never polls.
+ * (parseFrame already caps each text at MAX_TEXT_LEN.)
+ */
+const MAX_QUEUED_MESSAGES = 200;
 
 /** Build a {@link LiveBridge}. Holds no resources of its own; callers attach
  *  PeerLinks from a discovery session via {@link LiveBridge.addLink}. */
@@ -95,11 +130,20 @@ export function createLiveBridge(): LiveBridge {
     },
     addLink(link) {
       const handle = link.hello.handle;
-      boxes.set(handle, { link, incoming: [] });
+      boxes.set(handle, { link, incoming: [], messages: [] });
       // Route every rtc-* frame the peer sends into this peer's mailbox.
       link.onSignal((f) => {
         const mb = boxes.get(handle);
         if (mb) mb.incoming.push(f);
+      });
+      // Same for text messages, capped (see MAX_QUEUED_MESSAGES).
+      link.onMessage((m) => {
+        const mb = boxes.get(handle);
+        if (!mb) return;
+        mb.messages.push(m);
+        if (mb.messages.length > MAX_QUEUED_MESSAGES) {
+          mb.messages.splice(0, mb.messages.length - MAX_QUEUED_MESSAGES);
+        }
       });
       link.onClose(() => {
         // Only drop the entry if THIS link is still the current one for the
@@ -121,6 +165,22 @@ export function createLiveBridge(): LiveBridge {
         const cur = boxes.get(handle);
         if (!cur) return null; // peer vanished mid-poll
         if (cur.incoming.length > 0) return cur.incoming.shift() ?? null;
+      }
+      return null;
+    },
+    sendMessage(handle, text) {
+      boxes.get(handle)?.link.send(text);
+    },
+    async pollMessage(handle, timeoutMs) {
+      const mb = boxes.get(handle);
+      if (!mb) return null;
+      if (mb.messages.length > 0) return mb.messages.shift() ?? null;
+      const deadline = Date.now() + timeoutMs;
+      while (Date.now() < deadline) {
+        await new Promise((r) => setTimeout(r, 100));
+        const cur = boxes.get(handle);
+        if (!cur) return null; // peer vanished mid-poll
+        if (cur.messages.length > 0) return cur.messages.shift() ?? null;
       }
       return null;
     },
@@ -152,8 +212,9 @@ export interface StartServerOptions {
   /** Override the notification sink (tests). Defaults to vibe-core's `notify`. */
   readonly notify?: NotifySink;
   /** Optional live-signaling bridge. When set, the server exposes
-   *  `/api/live/peers` + `/live/signal` so the web app can do browser WebRTC
-   *  with the bridge's connected peers. Omit (tests) to keep the server a pure
+   *  `/api/live/peers`, `/live/signal` (WebRTC signaling) and `/live/message`
+   *  (text chat) so the web app can do browser WebRTC + text chat with the
+   *  bridge's connected peers. Omit (tests) to keep the server a pure
    *  local-data server with no live routes active. */
   readonly live?: LiveBridge;
 }
@@ -375,6 +436,72 @@ async function handle(
       return;
     }
     live.sendSignal(handle, reParsed);
+    sendJson(res, 200, { ok: true });
+    return;
+  }
+
+  // GET /live/message?handle=<peerHandle>  — long-poll for the next incoming
+  // text message from that peer. Returns {message} (a msg payload: id/text/at)
+  // or {message: null} on timeout. The browser runs one poll loop per peer.
+  if (req.method === 'GET' && pathname === '/live/message') {
+    const live = opts.live;
+    if (!live) {
+      sendJson(res, 200, { message: null, reason: 'live-not-attached' });
+      return;
+    }
+    const handle = url.searchParams.get('handle') ?? '';
+    if (handle === '') {
+      sendJson(res, 400, { error: 'missing handle' });
+      return;
+    }
+    const message = await live.pollMessage(handle, 25_000);
+    // The client may have hung up while we were long-polling — don't write to a
+    // dead socket.
+    if (req.destroyed || res.writableEnded) return;
+    sendJson(res, 200, { message });
+    return;
+  }
+
+  // POST /live/message  {handle, text}  — relay one text message from the
+  // browser to the peer's PeerLink. The text is round-tripped through
+  // parseFrame's allowlist as a real `msg` frame BEFORE it reaches the wire —
+  // the same defense-in-depth as POST /live/signal.
+  if (req.method === 'POST' && pathname === '/live/message') {
+    const live = opts.live;
+    if (!live) {
+      sendJson(res, 400, { error: 'live-not-attached' });
+      return;
+    }
+    const body = await readBody(req);
+    let parsed: Record<string, unknown> = {};
+    try {
+      parsed = JSON.parse(body) as Record<string, unknown>;
+    } catch {
+      sendJson(res, 400, { error: 'invalid JSON body' });
+      return;
+    }
+    const handle = typeof parsed['handle'] === 'string' ? parsed['handle'] : '';
+    if (handle === '') {
+      sendJson(res, 400, { error: 'missing handle' });
+      return;
+    }
+    const text = parsed['text'];
+    if (typeof text !== 'string') {
+      sendJson(res, 400, { error: 'missing text' });
+      return;
+    }
+    // Build the exact frame this text would ride on and re-parse it through
+    // the allowlist — an empty / oversized / non-string payload never reaches
+    // the PeerLink. id + at are minted HERE; the browser supplies text only,
+    // and extra keys on the body can't leak into the wire frame by construction.
+    const reParsed = parseFrame(
+      JSON.stringify({ t: 'msg', id: randomUUID(), text, at: Date.now() }),
+    );
+    if (reParsed === null || reParsed.t !== 'msg') {
+      sendJson(res, 400, { error: 'invalid message text' });
+      return;
+    }
+    live.sendMessage(handle, reParsed.text);
     sendJson(res, 200, { ok: true });
     return;
   }
