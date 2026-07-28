@@ -35,6 +35,7 @@ import {
   type DiscoverySession,
   type PeerHello,
 } from './p2p.js';
+import { ROOM_TOPIC_PREFIX, startRoom } from './room.js';
 import { loadOrCreateIdentity, loadOrCreateNostrKey, signHelloClaims } from './identity.js';
 import { createNostrPoolTransport, createNostrRelayLink } from './relay.js';
 import { ensureHandle } from './handlegen.js';
@@ -85,6 +86,7 @@ export type Command =
   | 'blocklist'
   | 'daemon'
   | 'mcp'
+  | 'room'
   | 'help'
   | 'version'
   | null;
@@ -111,6 +113,8 @@ export interface ParsedArgs {
    * auto-fallback-on-timeout is a follow-up. Default false.
    */
   readonly viaRelay: boolean;
+  /** `room <name>` positional, or `--room <name>`: join/create a named room. */
+  readonly room: string | undefined;
 }
 
 function parsePort(raw: string): number | undefined {
@@ -134,6 +138,7 @@ export function parseArgs(argv: readonly string[]): ParsedArgs {
     to: undefined,
     keepAlive: false,
     viaRelay: false,
+    room: undefined,
   };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i]!;
@@ -148,6 +153,7 @@ export function parseArgs(argv: readonly string[]): ParsedArgs {
         to: undefined,
         keepAlive: false,
         viaRelay: false,
+        room: undefined,
       };
     }
     if (a === '--help' || a === '-h') {
@@ -161,6 +167,7 @@ export function parseArgs(argv: readonly string[]): ParsedArgs {
         to: undefined,
         keepAlive: false,
         viaRelay: false,
+        room: undefined,
       };
     }
     if (a === '--live') {
@@ -173,6 +180,18 @@ export function parseArgs(argv: readonly string[]): ParsedArgs {
     }
     if (a === '--via-relay') {
       out = { ...out, viaRelay: true };
+      continue;
+    }
+    if (a === '--room') {
+      const next = argv[i + 1];
+      if (next !== undefined) {
+        out = { ...out, room: next };
+        i++;
+      }
+      continue;
+    }
+    if (a.startsWith('--room=')) {
+      out = { ...out, room: a.slice('--room='.length) };
       continue;
     }
     if (a === '--any') {
@@ -223,6 +242,7 @@ export function parseArgs(argv: readonly string[]): ParsedArgs {
       a === 'blocklist' ||
       a === 'daemon' ||
       a === 'mcp' ||
+      a === 'room' ||
       a === 'help'
         ? a
         : null;
@@ -879,6 +899,121 @@ async function cmdLive(
 }
 
 /**
+ * `vibedating room <name>` — join (or create) a named room on the DHT and chat
+ * with EVERY member (multi-peer, NOT 1:1 pairing).
+ *
+ * A room is its own topic `sha256('vibedate-room:'+name)`, fully separate from
+ * the league topics. Every member discovers every other member (a live roster);
+ * each line you type is BROADCAST to all of them, and every incoming line is
+ * printed with its sender's handle. Consent-gated exactly like `live` (the
+ * command IS the opt-in). `// ponytail:` group video lives in the web app
+ * (`open --room <name>`) — the CLI room is text-only.
+ */
+async function cmdRoom(name: string | undefined, keepAlive: boolean): Promise<number> {
+  if (name === undefined || name.trim() === '') {
+    process.stderr.write('usage: vibedating room <name>\n');
+    return 1;
+  }
+  const profile = loadProfile();
+  if (!profile) {
+    process.stderr.write('Not connected yet. Run `vibedating connect` first.\n');
+    return 1;
+  }
+  // The `room` command IS the opt-in (mirrors `live`/`discover --live`).
+  if (!canShareLive()) grantLiveConsent();
+  if (!canShareLive()) {
+    process.stderr.write('Could not enable live discovery. Try `vibedating discover --live`.\n');
+    return 1;
+  }
+
+  const hello = buildHello(profile);
+  process.stdout.write('\n');
+  process.stdout.write(`  ${LIVE_NOTICE}\n`);
+  process.stdout.write(`  ${MARKS_LEGEND}\n`);
+  process.stdout.write(`  room: ${name}  (cross-league — everyone in the room is a member)\n`);
+
+  const session = await startRoom({
+    hello,
+    room: name,
+    isBlocked: blockedChecker(),
+  });
+  session.onRoster((members) => {
+    if (members.length === 0) {
+      process.stdout.write('  · room empty — waiting for members…\n');
+      return;
+    }
+    const list = members
+      .map(
+        (m) =>
+          `${sanitizePeerText(m.handle)} (${m.league} · ${m.harness}) ${usageMark(m)}${idMark(m)}`,
+      )
+      .join(', ');
+    process.stdout.write(`  · room (${members.length}): ${list}\n`);
+  });
+  session.onMessage((m) => {
+    // AEGIS-lite: chat text is UNTRUSTED display data — sanitized before print.
+    process.stdout.write(`  <${sanitizePeerText(m.from)}> ${sanitizePeerText(m.text)}\n`);
+  });
+  process.stdout.write(
+    `  topic: ${ROOM_TOPIC_PREFIX}${name} → ${session.topic.toString('hex').slice(0, 12)}…\n`,
+  );
+  process.stdout.write('  type to broadcast to the whole room · /who · /quit\n');
+  process.stdout.write(`  group video: run \`vibedating open --room ${name}\`\n\n`);
+
+  // Read stdin line by line; each line broadcasts to the whole room.
+  const rl = readline.createInterface({ input: process.stdin, terminal: false });
+  const stop = (): void => {
+    rl.close();
+  };
+  process.once('SIGINT', stop);
+  process.once('SIGTERM', stop);
+
+  let quitRequested = false;
+  for await (const line of rl) {
+    const text = line.trim();
+    if (text === '/quit') {
+      quitRequested = true;
+      break;
+    }
+    if (text === '/who') {
+      const members = [...session.members.values()];
+      if (members.length === 0) {
+        process.stdout.write('  · room empty\n');
+      } else {
+        for (const m of members) {
+          process.stdout.write(
+            `  · ${sanitizePeerText(m.handle)} (${m.league} · ${m.harness}) ${usageMark(m)}${idMark(m)}\n`,
+          );
+        }
+      }
+      continue;
+    }
+    if (text === '') continue;
+    const reached = session.broadcast(text);
+    if (reached.length === 0) {
+      process.stdout.write('  · room empty — no one to hear you yet\n');
+    }
+  }
+
+  // Mirror `live`: an unattended (non-TTY stdin) session stays in the room on
+  // EOF instead of dying — `--keep-alive`, or automatic when stdin is not a TTY.
+  if (!quitRequested && shouldKeepAlive(keepAlive, process.stdin.isTTY)) {
+    process.stdout.write('  stdin closed — staying in the room (Ctrl+C / SIGTERM to leave)\n');
+    await new Promise<void>((resolve) => {
+      process.once('SIGINT', () => resolve());
+      process.once('SIGTERM', () => resolve());
+    });
+  }
+
+  process.removeListener('SIGINT', stop);
+  process.removeListener('SIGTERM', stop);
+  process.stdout.write('\n  leaving the room…\n');
+  await session.close();
+  process.stdout.write('\n');
+  return 0;
+}
+
+/**
  * `vibedate find <@handle> [--any]` — targeted discovery, not omegle.
  *
  * Joins discovery on your league (+ adjacent, or --any for every league) and
@@ -1148,9 +1283,15 @@ Usage:
                                 NEW matches, never opens chat/video. install adds a
                                 login service (launchd on macOS, systemd on Linux);
                                 uninstall removes it.
-  vibedating open [--port N] [--any]  Serve the local web app (default: random port)
-                                + live video + chat with connected peers
-                                (your league + adjacent; --any = every league)
+  vibedating room <name>        Join/create a named room (multi-peer): live roster
+                                + group text chat broadcast to all members.
+                                Consent-gated like live. /who lists members, /quit leaves.
+  vibedating open [--port N] [--any] [--room <name>]  Serve the local web app (default:
+                                random port) + live video + chat with connected peers
+                                (your league + adjacent; --any = every league).
+                                --room <name> opens the room view instead: roster +
+                                group chat + full-mesh group video (~6 people; an SFU
+                                is the upgrade path for bigger rooms).
   vibedating mcp                Run the stdio MCP server (profile, matches)
   vibedating --version
   vibedating --help
@@ -1207,6 +1348,8 @@ async function main(argv: readonly string[]): Promise<number> {
       return cmdLive(parsed.dating, parsed.any, parsed.to, parsed.keepAlive, parsed.viaRelay);
     case 'find':
       return cmdFind(parsed.arg, parsed.any);
+    case 'room':
+      return cmdRoom(parsed.arg ?? parsed.room, parsed.keepAlive);
     case 'mcp':
       await runMcp();
       return 0;

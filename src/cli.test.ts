@@ -339,6 +339,56 @@ describe('parseArgs — --via-relay fallback flag', () => {
   });
 });
 
+describe('parseArgs — room command + --room flag', () => {
+  it('recognizes the room subcommand', () => {
+    expect(parseArgs(['room']).command).toBe('room');
+  });
+
+  it('room captures the name as arg', () => {
+    expect(parseArgs(['room', 'den']).arg).toBe('den');
+    expect(parseArgs(['room', 'the-lounge']).arg).toBe('the-lounge');
+  });
+
+  it('room with no name → arg undefined', () => {
+    expect(parseArgs(['room']).arg).toBeUndefined();
+  });
+
+  it('room defaults to undefined', () => {
+    expect(parseArgs(['live']).room).toBeUndefined();
+    expect(parseArgs(['open']).room).toBeUndefined();
+  });
+
+  it('open --room <name> sets room (and does not grab the command slot)', () => {
+    expect(parseArgs(['open', '--room', 'den'])).toMatchObject({
+      command: 'open',
+      room: 'den',
+    });
+  });
+
+  it('open --room=<name> sets room', () => {
+    expect(parseArgs(['open', '--room=den']).room).toBe('den');
+  });
+
+  it('open --room with no following value leaves room undefined', () => {
+    expect(parseArgs(['open', '--room']).room).toBeUndefined();
+  });
+
+  it('open --room combines with --port', () => {
+    expect(parseArgs(['open', '--room', 'den', '--port', '8080'])).toMatchObject({
+      command: 'open',
+      room: 'den',
+      port: 8080,
+    });
+  });
+
+  it('room <name> uses the positional; --room is the flag fallback the CLI reads', () => {
+    expect(parseArgs(['room', 'den']).arg).toBe('den');
+    // No positional, but --room carries the name → the CLI does arg ?? room.
+    expect(parseArgs(['room', '--room', 'fallback']).arg).toBeUndefined();
+    expect(parseArgs(['room', '--room', 'fallback']).room).toBe('fallback');
+  });
+});
+
 describe('shouldKeepAlive() — the EOF policy', () => {
   it('interactive TTY without the flag exits on EOF (legacy behavior)', () => {
     expect(shouldKeepAlive(false, true)).toBe(false);
