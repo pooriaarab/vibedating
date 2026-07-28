@@ -35,7 +35,7 @@ import {
   type DiscoverySession,
   type PeerHello,
 } from './p2p.js';
-import { ROOM_TOPIC_PREFIX, startRoom } from './room.js';
+import { ROOM_TOPIC_PREFIX, startRoom, type RoomSession } from './room.js';
 import { loadOrCreateIdentity, loadOrCreateNostrKey, signHelloClaims } from './identity.js';
 import { createNostrPoolTransport, createNostrRelayLink } from './relay.js';
 import { ensureHandle } from './handlegen.js';
@@ -66,11 +66,11 @@ import {
   saveHandle,
   type ProfileState,
 } from './state.js';
-import { createLiveBridge, startServer, type LiveBridge } from './server.js';
+import { createLiveBridge, createRoomBridge, startServer, type LiveBridge, type RoomBridge } from './server.js';
 import { runMcp } from './mcp.js';
 
 /** Mirrors package.json version (kept here; package.json imports are brittle under bundling). */
-const VERSION = '0.6.0';
+const VERSION = '0.7.0';
 
 /** Recognized top-level commands, plus the synthetic help/version. */
 export type Command =
@@ -561,44 +561,76 @@ async function cmdDiscover(live: boolean, any: boolean, viaRelay: boolean): Prom
   return 0;
 }
 
-async function cmdOpen(port: number | undefined, any: boolean): Promise<number> {
+async function cmdOpen(port: number | undefined, any: boolean, room: string | undefined): Promise<number> {
   // Attach a live-signaling bridge IF the user has connected a profile, so the
   // web app can reach real peers. `open` is treated as the live opt-in exactly
   // like `live` / `discover --live` (the command invocation grants consent), and
   // honors the SAME league scoping as `live`/`discover`: your league ±1 by
   // default, every league with `--any`. Without a profile the web app still
   // serves the local dating demo — live just has nobody to reach yet.
+  //
+  // `--room <name>` is the GROUP path: instead of 1:1 league discovery, the web
+  // app joins a named room and gets the room view (roster + group chat +
+  // full-mesh video). The room bridge is mutually exclusive with the live
+  // bridge — `open` is in EITHER room mode OR 1:1 mode, never both.
   const profile = loadProfile();
   let live: LiveBridge | undefined;
+  let roomBridge: RoomBridge | undefined;
   let session: DiscoverySession | undefined;
+  let roomSession: RoomSession | undefined;
   if (profile) {
     if (!canShareLive()) grantLiveConsent();
-    live = createLiveBridge();
+    if (room !== undefined) {
+      roomBridge = createRoomBridge(room);
+    } else {
+      live = createLiveBridge();
+    }
   }
-  // Serve the web app FIRST — it must load instantly and work OFFLINE. Live
-  // discovery joins the DHT in the BACKGROUND: bootstrap can be slow, or with
-  // no network never complete, and the local app must never wait on it.
-  const started = await startServer({ port, live });
-  if (profile && live) {
+  // Serve the web app FIRST — it must load instantly and work OFFLINE. Live /
+  // room discovery joins the DHT in the BACKGROUND: bootstrap can be slow, or
+  // with no network never complete, and the local app must never wait on it.
+  const started = await startServer({
+    port,
+    live,
+    ...(roomBridge === undefined ? {} : { room: roomBridge }),
+  });
+  if (profile) {
     process.stdout.write(`\n  ${LIVE_NOTICE}\n`);
     const hello = buildHello(profile);
-    const { topics, acceptLeague } = discoveryScope(profile.league, any);
-    void startDiscovery({
-      hello,
-      topics,
-      acceptLeague,
-      isBlocked: blockedChecker(),
-      onLink: (link) => live!.addLink(link),
-    })
-      .then((s) => {
-        session = s;
+    if (room !== undefined && roomBridge !== undefined) {
+      // Room mode: join the named room in the background + attach the bridge
+      // (the web app’s room view lights up the moment members connect).
+      void startRoom({ hello, room, isBlocked: blockedChecker() })
+        .then((s) => {
+          roomSession = s;
+          roomBridge!.attach(s);
+        })
+        .catch(() => {
+          /* offline / DHT unreachable — web app still works, room just has no members yet */
+        });
+    } else if (live) {
+      const { topics, acceptLeague } = discoveryScope(profile.league, any);
+      void startDiscovery({
+        hello,
+        topics,
+        acceptLeague,
+        isBlocked: blockedChecker(),
+        onLink: (link) => live!.addLink(link),
       })
-      .catch(() => {
-        /* offline / DHT unreachable — web app still works, live just has no peers yet */
-      });
+        .then((s) => {
+          session = s;
+        })
+        .catch(() => {
+          /* offline / DHT unreachable — web app still works, live just has no peers yet */
+        });
+    }
   }
   process.stdout.write(`\n  vibedating local web app → ${started.url}\n`);
-  if (live) {
+  if (room !== undefined) {
+    process.stdout.write(
+      `  • room: ${room} — roster + group chat + full-mesh group video (~6 people; an SFU is the upgrade path for bigger rooms)\n`,
+    );
+  } else if (live) {
     process.stdout.write(
       any
         ? '  • live video + chat available for connected peers (ANY league — --any)\n'
@@ -609,12 +641,13 @@ async function cmdOpen(port: number | undefined, any: boolean): Promise<number> 
   }
   process.stdout.write('  • raw usage stays local · only league shared\n');
   process.stdout.write('  (Ctrl+C to stop)\n\n');
-  // Run until interrupted, then leave the swarm + close the server cleanly.
+  // Run until interrupted, then leave the swarm/room + close the server cleanly.
   await new Promise<void>((resolve) => {
     process.once('SIGINT', () => resolve());
     process.once('SIGTERM', () => resolve());
   });
   process.stdout.write('\n  shutting down…\n');
+  if (roomSession) await roomSession.close();
   if (session) await session.close();
   await new Promise<void>((resolve) => started.server.close(() => resolve()));
   return 0;
@@ -1343,7 +1376,7 @@ async function main(argv: readonly string[]): Promise<number> {
     case 'discover':
       return cmdDiscover(parsed.live, parsed.any, parsed.viaRelay);
     case 'open':
-      return cmdOpen(parsed.port, parsed.any);
+      return cmdOpen(parsed.port, parsed.any, parsed.room);
     case 'live':
       return cmdLive(parsed.dating, parsed.any, parsed.to, parsed.keepAlive, parsed.viaRelay);
     case 'find':
