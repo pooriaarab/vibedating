@@ -199,6 +199,13 @@ export interface DiscoveryOptions {
    * peers that arrive on a shared topic.
    */
   readonly acceptLeague?: (peerLeague: string) => boolean;
+  /**
+   * Predicate over an incoming peer's advertised handle. A blocked peer's hello
+   * is DROPPED exactly like a wrong-league one — never recorded to peers.json,
+   * never notified, never handed to `onLink`/pairing. Default: nothing blocked.
+   * The CLI passes one backed by the persisted blocklist (~/.vibedating).
+   */
+  readonly isBlocked?: (handle: string) => boolean;
   /** DHT bootstrap nodes; omit for the public DHT. Tests pass a local testnet. */
   readonly bootstrap?: ReadonlyArray<{ readonly host: string; readonly port: number }>;
   /** Where peers.json lives. Defaults to ~/.vibedating. */
@@ -238,6 +245,7 @@ export interface DiscoverySession {
  */
 export async function startDiscovery(opts: DiscoveryOptions): Promise<DiscoverySession> {
   const { hello, stateDir = defaultStateDir(), onPeer, onLink, notify = vibeCoreNotify } = opts;
+  const isBlocked = opts.isBlocked;
   // Topics: explicit list (preferred) > single legacy `topic` > own-league default.
   const topics: Buffer[] = opts.topics
     ? [...opts.topics]
@@ -302,6 +310,10 @@ export async function startDiscovery(opts: DiscoveryOptions): Promise<DiscoveryS
         // — drop it. `acceptLeague` defaults to EXACT own-league match, so the
         // legacy privacy invariant is unchanged unless a caller widens it.
         if (!acceptLeague(peer.league)) continue;
+        // A blocked peer is dropped exactly like a wrong-league one: never
+        // recorded to peers.json, never notified, never handed to onLink. The
+        // CLI injects a predicate backed by the persisted blocklist.
+        if (isBlocked !== undefined && isBlocked(peer.handle)) continue;
         peers.set(remoteKey, peer);
         const { isNew } = recordPeer(peer, stateDir);
         if (isNew) {

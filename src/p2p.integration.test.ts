@@ -3,11 +3,7 @@
  * in-process DHT (hyperdht's createTestnet — the public DHT is never touched).
  * They discover each other via a shared random topic, run the handshake both
  * ways, and each must end up with the other's { handle, league } in its peer
-<<<<<<< HEAD
- * set (and in its peers.json). A mismatch-league impostor must be dropped.
-=======
  * set (and in its peers.json). A mismatched-league impostor must be dropped.
->>>>>>> origin/p2p-matching
  */
 import { mkdtempSync, rmSync } from 'node:fs';
 import os from 'node:os';
@@ -22,9 +18,12 @@ import {
   type DiscoverySession,
   type PeerHello,
 } from './p2p.js';
+import { serializeFrame } from './frame.js';
+import { sameHandle } from './state.js';
 
 const ALICE: PeerHello = { handle: '@alice_10M', league: '10M', harness: 'claude-code' };
 const BOB: PeerHello = { handle: '@bob_10M', league: '10M', harness: 'codex' };
+const CAROL: PeerHello = { handle: '@carol_10M', league: '10M', harness: 'cursor' };
 
 async function waitFor(cond: () => boolean, timeoutMs: number): Promise<boolean> {
   const deadline = Date.now() + timeoutMs;
@@ -155,6 +154,102 @@ describe('live P2P discovery (in-process DHT, no public network)', () => {
     } finally {
       clearInterval(retry);
       await mallory.destroy();
+    }
+  }, 30_000);
+
+  it('find flags exactly the target handle among several peers (sameHandle filter)', async () => {
+    // Mirrors `vibedate find <@handle>`: ALICE is the finder, BOB is the target,
+    // CAROL is a same-league decoy. ALICE's onPeer records every peer and flags
+    // the one whose handle matches the target (★) — the decoy is seen but never
+    // flagged.
+    const topic = randomTopic();
+    const target = BOB.handle; // '@bob_10M'
+    const seen = new Set<string>();
+
+    const alice = await startDiscovery({
+      hello: ALICE,
+      topic,
+      bootstrap: testnet.bootstrap,
+      stateDir: tmpDir(),
+      onPeer: (peer) => {
+        seen.add(peer.handle);
+        if (sameHandle(peer.handle, target)) seen.add('★' + peer.handle);
+      },
+    });
+    sessions.push(alice);
+    const bob = await spawn(BOB, topic);
+    const carol = await spawn(CAROL, topic);
+    await Promise.all([alice.ready, bob.ready, carol.ready]);
+
+    const ok = await waitFor(
+      () => seen.has(BOB.handle) && seen.has(CAROL.handle) && seen.has('★' + BOB.handle),
+      20_000,
+    );
+    expect(ok).toBe(true);
+    // The decoy was discovered but NOT flagged as the target.
+    expect(seen.has('★' + CAROL.handle)).toBe(false);
+  }, 30_000);
+
+  it('drops a blocked peer (isBlocked) exactly like a wrong-league one', async () => {
+    // ALICE blocks BOB's handle via the injected isBlocked predicate. A raw
+    // impostor (not via startDiscovery) plays BOB: joins the topic and pushes
+    // BOB's hello as a typed frame on every connection. The connection still
+    // happens (BOB sees ALICE's hello), but ALICE drops BOB's hello on arrival —
+    // never recorded to peers.json, never notified, never passed to onPeer.
+    // (Mirrors the proven wrong-league impostor test above, with isBlocked.)
+    const topic = randomTopic();
+    let onPeerFired = false;
+    const aliceDir = tmpDir();
+    const alice = await startDiscovery({
+      hello: ALICE,
+      topic,
+      bootstrap: testnet.bootstrap,
+      stateDir: aliceDir,
+      isBlocked: (h) => sameHandle(h, BOB.handle),
+      onPeer: () => {
+        onPeerFired = true;
+      },
+    });
+    sessions.push(alice);
+
+    const { default: Hyperswarm } = await import('hyperswarm');
+    const bobRaw = new Hyperswarm({ bootstrap: testnet.bootstrap });
+    await bobRaw.dht.fullyBootstrapped();
+    let aliceHelloSeen = '';
+    bobRaw.on('connection', (socket) => {
+      socket.write(
+        serializeFrame({
+          t: 'hello',
+          handle: BOB.handle,
+          league: BOB.league,
+          harness: BOB.harness,
+        }) + '\n',
+      );
+      socket.on('data', (chunk: Buffer) => {
+        aliceHelloSeen += chunk.toString('utf8');
+      });
+      socket.on('error', () => {});
+    });
+    const discovery = bobRaw.join(topic, { server: true, client: true });
+    // A bare swarm refreshes a topic only every ~10 min and its first round can
+    // miss/error under load — re-run rounds eagerly (startDiscovery does this
+    // internally; the raw impostor does not).
+    const retry = setInterval(() => {
+      void discovery.refresh({ server: true, client: true }).catch(() => {});
+    }, 1000);
+
+    try {
+      // The connection + one-way handshake definitely happened (BOB saw ALICE).
+      const connected = await waitFor(() => aliceHelloSeen.includes(ALICE.handle), 20_000);
+      expect(connected).toBe(true);
+      // …but ALICE blocked BOB, so BOB is dropped entirely.
+      await new Promise((r) => setTimeout(r, 1000)); // let any (non-)processing settle
+      expect([...alice.peers.values()]).toEqual([]);
+      expect(onPeerFired).toBe(false);
+      expect(loadPeers(aliceDir).map((p) => p.handle)).not.toContain(BOB.handle);
+    } finally {
+      clearInterval(retry);
+      await bobRaw.destroy();
     }
   }, 30_000);
 });
