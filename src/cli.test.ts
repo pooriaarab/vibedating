@@ -142,6 +142,53 @@ describe('parseArgs — handle command + positional arg', () => {
   });
 });
 
+describe('parseArgs — find command + live --to flag', () => {
+  it('recognizes the find subcommand', () => {
+    expect(parseArgs(['find']).command).toBe('find');
+  });
+
+  it('find captures the target handle as arg', () => {
+    expect(parseArgs(['find', '@alice']).arg).toBe('@alice');
+    expect(parseArgs(['find', 'alice']).arg).toBe('alice');
+  });
+
+  it('find combines with --any', () => {
+    const p = parseArgs(['find', '@alice', '--any']);
+    expect(p.command).toBe('find');
+    expect(p.arg).toBe('@alice');
+    expect(p.any).toBe(true);
+  });
+
+  it('to defaults to undefined', () => {
+    expect(parseArgs(['live']).to).toBeUndefined();
+    expect(parseArgs(['live', '--dating']).to).toBeUndefined();
+  });
+
+  it('live --to <@handle> sets to', () => {
+    expect(parseArgs(['live', '--to', '@alice'])).toMatchObject({
+      command: 'live',
+      to: '@alice',
+    });
+  });
+
+  it('live --to=<@handle> sets to', () => {
+    expect(parseArgs(['live', '--to=@alice']).to).toBe('@alice');
+  });
+
+  it('live --to with no following value leaves to undefined', () => {
+    expect(parseArgs(['live', '--to']).to).toBeUndefined();
+  });
+
+  it('live --to combines with --dating and --any', () => {
+    expect(parseArgs(['live', '--dating', '--any', '--to', '@x'])).toMatchObject({
+      command: 'live',
+      dating: true,
+      any: true,
+      to: '@x',
+    });
+  });
+});
+
 describe('parseArgs — --any flag', () => {
   it('defaults to false', () => {
     expect(parseArgs(['discover']).any).toBe(false);
