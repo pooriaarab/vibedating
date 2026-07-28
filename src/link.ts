@@ -30,6 +30,7 @@ import {
   type ReceivedMedia,
   sendMediaFile,
 } from './media.js';
+import type { PeerHello } from './p2p.js';
 
 /** Options for {@link createPeerLink}. */
 export interface CreatePeerLinkOptions {
@@ -39,7 +40,7 @@ export interface CreatePeerLinkOptions {
 
 export interface PeerLink {
   /** The validated identity of the remote peer (from the hello handshake). */
-  readonly hello: { handle: string; league: string; harness: string };
+  readonly hello: PeerHello;
   /** Send a line of text as a `msg` frame. */
   send(text: string): void;
   /** Read a file from disk and send it as a chunked media transfer. */
@@ -69,7 +70,7 @@ export interface PeerLink {
  */
 export function createPeerLink(
   socket: Duplex,
-  hello: { handle: string; league: string; harness: string },
+  hello: PeerHello,
   initialBuffer = '',
   linkOpts: CreatePeerLinkOptions = {},
 ): PeerLink {

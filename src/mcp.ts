@@ -45,7 +45,7 @@ export async function runMcp(): Promise<void> {
         `handle: ${p.handle}`,
         `harness: ${p.harness}`,
         `league: ${p.league} League`,
-        `verified: ${p.verified ? 'true (read-only OAuth)' : 'false (self-reported)'}`,
+        `verified: ${p.verified ? 'true (real local usage)' : 'false (self-reported or demo)'}`,
         'privacy: raw token usage is local-only; only the league bucket is shared.',
       ];
       return { content: [textBlock(lines.join('\n'))] };

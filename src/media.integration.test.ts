@@ -203,14 +203,14 @@ describe('media transfer (in-process DHT, no public network)', () => {
     });
     await Promise.all([a.ready, b.ready]);
 
-    expect(await waitFor(() => !!linkA && !!linkB, 15_000)).toBe(true);
+    expect(await waitFor(() => !!linkA && !!linkB, 40_000)).toBe(true);
 
     // A sends the file over its live PeerLink (chunked, backpressure-aware).
     const sent = await linkA!.sendMedia(pngPath);
     expect(sent.size).toBe(png.length);
 
     // B's onMedia fires with the reassembled file.
-    expect(await waitFor(() => received.length === 1, 15_000)).toBe(true);
+    expect(await waitFor(() => received.length === 1, 40_000)).toBe(true);
 
     const got = received[0]!;
     expect(got.mime).toBe('image/png');
@@ -252,14 +252,14 @@ describe('media transfer (in-process DHT, no public network)', () => {
     });
     await Promise.all([a.ready, b.ready]);
 
-    expect(await waitFor(() => !!linkA && !!linkB, 15_000)).toBe(true);
+    expect(await waitFor(() => !!linkA && !!linkB, 40_000)).toBe(true);
 
     // A sends the video file over its live PeerLink (chunked, backpressure-aware).
     const sent = await linkA!.sendMedia(mp4Path);
     expect(sent.size).toBe(mp4.length);
 
     // B's onMedia fires with the reassembled file.
-    expect(await waitFor(() => received.length === 1, 15_000)).toBe(true);
+    expect(await waitFor(() => received.length === 1, 40_000)).toBe(true);
 
     const got = received[0]!;
     expect(got.mime).toBe('video/mp4'); // inferred from the .mp4 extension

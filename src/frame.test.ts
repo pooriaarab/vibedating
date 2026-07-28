@@ -32,6 +32,73 @@ describe('frame protocol', () => {
   });
 });
 
+describe('frame protocol — hello verified flag', () => {
+  it('round-trips a hello with verified: true', () => {
+    const f: Frame = { t: 'hello', handle: '@a', league: '10M', harness: 'codex', verified: true };
+    expect(parseFrame(serializeFrame(f))).toEqual(f);
+  });
+  it('round-trips a hello with verified: false', () => {
+    const f: Frame = { t: 'hello', handle: '@a', league: '10M', harness: 'codex', verified: false };
+    expect(parseFrame(serializeFrame(f))).toEqual(f);
+  });
+  it('legacy hello without verified parses with the key absent (backward compat)', () => {
+    const parsed = parseFrame(JSON.stringify({ t: 'hello', handle: '@a', league: '10M' }));
+    expect(parsed).toEqual({ t: 'hello', handle: '@a', league: '10M', harness: 'unknown' });
+    expect(parsed).not.toHaveProperty('verified');
+  });
+  it('rejects a non-boolean verified (allowlist rigor)', () => {
+    expect(
+      parseFrame(JSON.stringify({ t: 'hello', handle: '@a', league: '10M', verified: 'yes' })),
+    ).toBeNull();
+    expect(
+      parseFrame(JSON.stringify({ t: 'hello', handle: '@a', league: '10M', verified: 1 })),
+    ).toBeNull();
+  });
+});
+
+describe('frame protocol — hello identity proof', () => {
+  const pubkey = 'a'.repeat(64);
+  const nonce = 'b'.repeat(32);
+  const sig = 'c'.repeat(128);
+  const base = { t: 'hello', handle: '@a', league: '10M', harness: 'codex' } as const;
+
+  it('round-trips a hello carrying pubkey + nonce + sig', () => {
+    const f: Frame = { ...base, verified: true, pubkey, nonce, sig };
+    expect(parseFrame(serializeFrame(f))).toEqual(f);
+  });
+
+  it('legacy hello carries no identity keys (backward compat)', () => {
+    const parsed = parseFrame(JSON.stringify(base));
+    expect(parsed).toEqual({ ...base });
+    expect(parsed).not.toHaveProperty('pubkey');
+    expect(parsed).not.toHaveProperty('sig');
+    expect(parsed).not.toHaveProperty('nonce');
+  });
+
+  it('rejects a malformed pubkey (not exactly 64 hex)', () => {
+    expect(parseFrame(JSON.stringify({ ...base, pubkey: 'a'.repeat(63) }))).toBeNull();
+    expect(parseFrame(JSON.stringify({ ...base, pubkey: 'a'.repeat(65) }))).toBeNull();
+    expect(parseFrame(JSON.stringify({ ...base, pubkey: 'z'.repeat(64) }))).toBeNull();
+    expect(parseFrame(JSON.stringify({ ...base, pubkey: 42 }))).toBeNull();
+  });
+
+  it('rejects a malformed sig (not exactly 128 hex)', () => {
+    expect(parseFrame(JSON.stringify({ ...base, sig: 'c'.repeat(127) }))).toBeNull();
+    expect(parseFrame(JSON.stringify({ ...base, sig: 'c'.repeat(129) }))).toBeNull();
+    expect(parseFrame(JSON.stringify({ ...base, sig: 'x'.repeat(128) }))).toBeNull();
+  });
+
+  it('rejects an oversized / non-hex nonce', () => {
+    expect(parseFrame(JSON.stringify({ ...base, nonce: 'b'.repeat(65) }))).toBeNull();
+    expect(parseFrame(JSON.stringify({ ...base, nonce: 'zz' }))).toBeNull();
+  });
+
+  it('admits uppercase hex (case-insensitive, length still exact)', () => {
+    const f: Frame = { ...base, pubkey: 'A'.repeat(64), nonce: 'B'.repeat(32), sig: 'C'.repeat(128) };
+    expect(parseFrame(serializeFrame(f))).toEqual(f);
+  });
+});
+
 describe('frame protocol — media frames', () => {
   it('round-trips a media-start frame', () => {
     const f: Frame = { t: 'media-start', id: 'm1', mime: 'image/png', size: 1234, name: 'cat.png' };

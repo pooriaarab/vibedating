@@ -8,6 +8,7 @@ import {
   loadPeers,
   parseHandshake,
   recordPeer,
+  recordPeerMessage,
   serializeHandshake,
   TOPIC_PREFIX,
   type PeerHello,
@@ -84,6 +85,47 @@ describe('serializeHandshake() / parseHandshake()', () => {
   });
 });
 
+describe('handshake — verified flag', () => {
+  it('round-trips a hello carrying verified', () => {
+    const v: PeerHello = { ...alice, verified: true };
+    expect(parseHandshake(serializeHandshake(v))).toEqual(v);
+  });
+
+  it('emits no verified key when the hello has none (legacy wire shape)', () => {
+    const wire = JSON.parse(serializeHandshake(alice)) as Record<string, unknown>;
+    expect(Object.keys(wire).sort()).toEqual(['handle', 'harness', 'league']);
+  });
+
+  it('accepts a peer-sent verified flag, rejects a non-boolean one', () => {
+    expect(
+      parseHandshake(JSON.stringify({ handle: '@a', league: '10M', verified: false })),
+    ).toEqual({ handle: '@a', league: '10M', harness: 'unknown', verified: false });
+    expect(
+      parseHandshake(JSON.stringify({ handle: '@a', league: '10M', verified: 'true' })),
+    ).toBeNull();
+  });
+
+  it('recordPeer persists verified when present, and drops it when a re-sighting omits it', () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), 'vibedating-peers-verified-'));
+    try {
+      recordPeer({ ...alice, verified: true }, dir);
+      expect(loadPeers(dir)[0]).toMatchObject({ handle: '@alice', verified: true });
+      recordPeer(alice, dir); // same handle, no verified this time
+      const peer = loadPeers(dir)[0]!;
+      expect(peer).not.toHaveProperty('verified');
+      expect(Object.keys(peer).sort()).toEqual([
+        'firstSeenAt',
+        'handle',
+        'harness',
+        'lastSeenAt',
+        'league',
+      ]);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
 describe('recordPeer() / loadPeers()', () => {
   let dir: string;
   beforeEach(() => {
@@ -126,5 +168,79 @@ describe('recordPeer() / loadPeers()', () => {
       'lastSeenAt',
       'league',
     ]);
+  });
+});
+
+describe('handshake — identity proof fields', () => {
+  const pubkey = 'a'.repeat(64);
+  const nonce = 'b'.repeat(32);
+  const sig = 'c'.repeat(128);
+  const signed: PeerHello = { ...alice, verified: true, pubkey, nonce, sig };
+
+  it('round-trips a hello carrying the full identity proof', () => {
+    expect(parseHandshake(serializeHandshake(signed))).toEqual(signed);
+  });
+
+  it('never serializes the local-derived identityVerified flag', () => {
+    const local: PeerHello = { ...alice, pubkey, identityVerified: true };
+    const wire = JSON.parse(serializeHandshake(local)) as Record<string, unknown>;
+    expect(Object.keys(wire).sort()).toEqual(['handle', 'harness', 'league', 'pubkey']);
+    expect(wire).not.toHaveProperty('identityVerified');
+  });
+
+  it('rejects malformed proof fields (same rigor as the frame parser)', () => {
+    expect(parseHandshake(JSON.stringify({ handle: '@a', league: '10M', pubkey: 'a'.repeat(63) }))).toBeNull();
+    expect(parseHandshake(JSON.stringify({ handle: '@a', league: '10M', sig: 'c'.repeat(127) }))).toBeNull();
+    expect(parseHandshake(JSON.stringify({ handle: '@a', league: '10M', nonce: 'b'.repeat(65) }))).toBeNull();
+    expect(parseHandshake(JSON.stringify({ handle: '@a', league: '10M', pubkey: 7 }))).toBeNull();
+  });
+
+  it('a hello with no pubkey parses as legacy (no identity keys added)', () => {
+    const parsed = parseHandshake(serializeHandshake(alice));
+    expect(parsed).toEqual(alice);
+    expect(parsed).not.toHaveProperty('pubkey');
+  });
+});
+
+describe('recordPeer() — identity + lastMessageAt persistence', () => {
+  let dir: string;
+  beforeEach(() => {
+    dir = mkdtempSync(path.join(os.tmpdir(), 'vibedating-peers-id-'));
+  });
+  afterEach(() => {
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('persists pubkey + identityVerified for an identity-verified peer', () => {
+    const pubkey = 'a'.repeat(64);
+    recordPeer({ ...alice, verified: true, pubkey, identityVerified: true }, dir);
+    const peer = loadPeers(dir)[0]!;
+    expect(peer).toMatchObject({ handle: '@alice', verified: true, pubkey, identityVerified: true });
+    expect(peer).not.toHaveProperty('sig');
+    expect(peer).not.toHaveProperty('nonce');
+  });
+
+  it('drops identity fields when a re-sighting no longer carries them', () => {
+    const pubkey = 'a'.repeat(64);
+    recordPeer({ ...alice, pubkey, identityVerified: true }, dir);
+    recordPeer(alice, dir); // legacy re-sighting
+    const peer = loadPeers(dir)[0]!;
+    expect(peer).not.toHaveProperty('pubkey');
+    expect(peer).not.toHaveProperty('identityVerified');
+  });
+
+  it('recordPeerMessage stamps lastMessageAt; a later hello preserves it', () => {
+    expect(recordPeerMessage('@nobody', dir)).toBe(false); // unknown handle
+    recordPeer(alice, dir, new Date('2026-07-27T00:00:00Z'));
+    expect(recordPeerMessage('@alice', dir, new Date('2026-07-27T02:00:00Z'))).toBe(true);
+    expect(loadPeers(dir)[0]).toMatchObject({ lastMessageAt: '2026-07-27T02:00:00.000Z' });
+    // A re-sighting (hello) must NOT reset local message metadata.
+    recordPeer({ ...alice, verified: true }, dir, new Date('2026-07-27T03:00:00Z'));
+    const peer = loadPeers(dir)[0]!;
+    expect(peer).toMatchObject({
+      verified: true,
+      lastSeenAt: '2026-07-27T03:00:00.000Z',
+      lastMessageAt: '2026-07-27T02:00:00.000Z',
+    });
   });
 });

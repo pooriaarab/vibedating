@@ -33,8 +33,24 @@ export const MAX_CANDIDATE_LEN = 4 * 1024; // 4 KiB
  */
 const MAX_FRAME_LEN = Math.max(MAX_B64_CHUNK_LEN, 2 * MAX_SDP_LEN) + 2048;
 
+/** Exact hex length of an ed25519 raw public key on a `hello` frame. */
+export const HELLO_PUBKEY_HEX_LEN = 64;
+/** Exact hex length of an ed25519 signature on a `hello` frame. */
+export const HELLO_SIG_HEX_LEN = 128;
+/** Largest hex nonce accepted on a `hello` frame (16 random bytes = 32). */
+export const MAX_HELLO_NONCE_HEX_LEN = 64;
+
 export type Frame =
-  | { t: 'hello'; handle: string; league: string; harness: string }
+  | {
+      t: 'hello';
+      handle: string;
+      league: string;
+      harness: string;
+      verified?: boolean;
+      pubkey?: string;
+      nonce?: string;
+      sig?: string;
+    }
   | { t: 'msg'; id: string; text: string; at: number }
   | { t: 'typing' }
   | { t: 'bye' }
@@ -71,7 +87,43 @@ export function parseFrame(raw: string | Buffer): Frame | null {
     case 'hello': {
       const { handle, league, harness } = r;
       if (typeof handle !== 'string' || typeof league !== 'string') return null;
-      return { t: 'hello', handle, league, harness: typeof harness === 'string' ? harness : 'unknown' };
+      // `verified` is optional (legacy peers omit it) but strictly boolean when
+      // present — it is the self-asserted usage-verification flag, carried so
+      // same-league peers can show an honest ✓ / ~ mark.
+      const verified = r['verified'];
+      if (verified !== undefined && typeof verified !== 'boolean') return null;
+      // Identity proof is optional too (legacy peers), but when any of it is
+      // present it must be exactly-shaped hex: a malformed claim is a broken or
+      // hostile peer, and the whole frame is dropped. Whether a well-formed
+      // claim actually VERIFIES is decided one layer up (identity.ts).
+      const pubkey = r['pubkey'];
+      if (
+        pubkey !== undefined &&
+        (typeof pubkey !== 'string' || !/^[0-9a-fA-F]{64}$/.test(pubkey))
+      )
+        return null;
+      const nonce = r['nonce'];
+      if (
+        nonce !== undefined &&
+        (typeof nonce !== 'string' || !/^[0-9a-fA-F]{1,64}$/.test(nonce))
+      )
+        return null;
+      const sig = r['sig'];
+      if (
+        sig !== undefined &&
+        (typeof sig !== 'string' || !/^[0-9a-fA-F]{128}$/.test(sig))
+      )
+        return null;
+      return {
+        t: 'hello',
+        handle,
+        league,
+        harness: typeof harness === 'string' ? harness : 'unknown',
+        ...(typeof verified === 'boolean' ? { verified } : {}),
+        ...(typeof pubkey === 'string' ? { pubkey } : {}),
+        ...(typeof nonce === 'string' ? { nonce } : {}),
+        ...(typeof sig === 'string' ? { sig } : {}),
+      };
     }
     case 'msg': {
       const id = r['id']; const txt = r['text']; const at = r['at'];
