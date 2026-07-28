@@ -459,6 +459,56 @@ export const webAppHtml = `<!DOCTYPE html>
   .incoming-call p{ color: var(--muted); font-size: .85rem; margin: 0 0 18px; }
   .incoming-call .ic-actions{ display: flex; gap: 10px; }
 
+  /* ---- room full-mesh group video ---- */
+  .room-panel{
+    position: fixed; right: 18px; bottom: 18px; z-index: 45;
+    background: linear-gradient(180deg, var(--bg-card), var(--bg-card-2));
+    border: 1px solid var(--border-2); border-radius: 16px; box-shadow: var(--shadow-2);
+    padding: 12px 14px; min-width: 240px; max-width: 280px; display: none;
+  }
+  .room-panel.is-open{ display: block; animation: rise var(--dur-med) var(--ease-out); }
+  .room-panel .rp-title{ font-size: .78rem; font-weight: 800; margin-bottom: 6px; display:flex; align-items:center; gap:6px; }
+  .room-panel .rp-meta{ font-size: .7rem; color: var(--muted-2); margin-bottom: 10px; line-height: 1.4; word-break: break-all; }
+  .room-panel .rp-actions{ display:flex; gap: 8px; }
+  .room-panel .rp-btn{
+    border: 0; border-radius: 9px; padding: 8px 14px; font-weight: 700; font-size: .78rem;
+    background: linear-gradient(180deg, var(--coral), var(--coral-dim)); color: #2a1109;
+    flex: 1;
+  }
+  .room-panel .rp-btn:disabled{ opacity: .4; cursor: not-allowed; }
+  .room-panel .rp-btn.is-leave{ background: var(--danger); color: #2a0a0c; }
+  .room-video{
+    position: fixed; inset: 0; z-index: 68;
+    display: none; flex-direction: column; align-items: stretch; justify-content: flex-start;
+    background: rgba(12,7,15,.86); backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px);
+    padding: 18px 18px 80px;
+  }
+  .room-video.is-open{ display: flex; }
+  .room-video .rv-head{
+    display:flex; align-items:center; justify-content: space-between; gap: 12px;
+    margin-bottom: 14px; color: var(--fg); font-weight: 800; font-size: .9rem;
+  }
+  .room-video .rv-grid{
+    flex: 1; display: grid; gap: 12px; min-height: 0;
+    grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+    align-content: start;
+  }
+  .room-video .rv-tile{
+    display:flex; flex-direction: column; gap: 6px; min-width: 0;
+  }
+  .room-video .rv-tile video{
+    width: 100%; aspect-ratio: 4 / 3; background: #000; border-radius: 14px;
+    border: 1px solid var(--border-2); object-fit: cover;
+  }
+  .room-video .rv-tile .rv-label{
+    font-size: .75rem; color: var(--muted); font-weight: 600; word-break: break-all;
+  }
+  .room-video .rv-leave{
+    position: absolute; bottom: 24px; left: 50%; transform: translateX(-50%);
+    border: 0; border-radius: 999px; padding: 12px 22px; font-weight: 800; font-size: .9rem;
+    background: var(--danger); color: #2a0a0c;
+  }
+
   /* ---- live text chat (browser <-> PeerLink over /live/message) ---- */
   .live-actions{ display: flex; gap: 6px; flex-shrink: 0; }
   .live-row .cbtn{
@@ -694,6 +744,24 @@ export const webAppHtml = `<!DOCTYPE html>
   <div class="vtile"><video id="remoteVideo" autoplay playsinline></video><div class="vlabel" id="remoteLabel">remote</div></div>
   <div class="vtile"><video id="localVideo" autoplay playsinline muted></video><div class="vlabel">you</div></div>
   <button class="vhangup" id="hangupBtn" type="button">Hang up</button>
+</div>
+
+<aside class="room-panel" id="roomPanel" aria-label="Room">
+  <div class="rp-title"><span class="lp-dot" aria-hidden="true"></span> Room</div>
+  <div class="rp-meta" id="roomMeta">not in a room</div>
+  <div class="rp-actions">
+    <button class="rp-btn" id="roomJoinBtn" type="button">Join video</button>
+    <button class="rp-btn is-leave" id="roomLeaveBtn" type="button" disabled>Leave</button>
+  </div>
+</aside>
+
+<div class="room-video" id="roomVideo" role="dialog" aria-modal="true" aria-label="Room video">
+  <div class="rv-head">
+    <span id="roomVideoTitle">Room video</span>
+    <span id="roomVideoCount" style="font-weight:600;color:var(--muted);font-size:.78rem"></span>
+  </div>
+  <div class="rv-grid" id="roomVideoGrid"></div>
+  <button class="rv-leave" id="roomVideoLeaveBtn" type="button">Leave video</button>
 </div>
 
 <script>
@@ -1361,6 +1429,252 @@ export const webAppHtml = `<!DOCTYPE html>
   }
   refreshPeers();
   setInterval(refreshPeers, 4000);
+
+  /* ---- Room full-mesh group video ----------------------------------------
+   * When vibedate open --room <name> is attached, /api/room exposes the
+   * roster. Each browser grabs getUserMedia once and opens one
+   * RTCPeerConnection to every other member. Deterministic offerer election
+   * (self < other lexicographic) avoids glare. Signaling rides the local
+   * server's merged mailbox: GET /room/signal?handle=SELF returns
+   * { frame: { from, rtc } }, POST /room/signal { handle: TARGET, frame }
+   * relays one rtc-* frame to that member. */
+  var roomPanel = document.getElementById("roomPanel");
+  var roomMeta = document.getElementById("roomMeta");
+  var roomJoinBtn = document.getElementById("roomJoinBtn");
+  var roomLeaveBtn = document.getElementById("roomLeaveBtn");
+  var roomVideo = document.getElementById("roomVideo");
+  var roomVideoGrid = document.getElementById("roomVideoGrid");
+  var roomVideoTitle = document.getElementById("roomVideoTitle");
+  var roomVideoCount = document.getElementById("roomVideoCount");
+  var roomVideoLeaveBtn = document.getElementById("roomVideoLeaveBtn");
+
+  var roomVid = { localStream: null, peers: {}, self: null, room: null, joined: false, polling: false };
+  var roomLastRoster = [];
+
+  function roomPostSignal(handle, frame){
+    return fetch("/room/signal", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ handle: handle, frame: frame })
+    }).catch(function(){ /* best effort */ });
+  }
+
+  function roomFetchSignal(selfHandle, timeoutMs){
+    var ctrl = new AbortController();
+    var t = setTimeout(function(){ ctrl.abort(); }, timeoutMs);
+    return fetch("/room/signal?handle=" + encodeURIComponent(selfHandle), { signal: ctrl.signal })
+      .then(function(r){ clearTimeout(t); return r; })
+      .catch(function(e){ clearTimeout(t); throw e; });
+  }
+
+  function makeRoomTile(label, muted){
+    var tile = document.createElement("div");
+    tile.className = "rv-tile";
+    var vid = document.createElement("video");
+    vid.autoplay = true;
+    vid.playsInline = true;
+    if (muted) vid.muted = true;
+    var lab = document.createElement("div");
+    lab.className = "rv-label";
+    lab.textContent = label;
+    tile.appendChild(vid);
+    tile.appendChild(lab);
+    roomVideoGrid.appendChild(tile);
+    return vid;
+  }
+
+  function updateRoomCount(){
+    var n = 0;
+    if (roomVid.localStream) n++;
+    for (var k in roomVid.peers) if (Object.prototype.hasOwnProperty.call(roomVid.peers, k)) n++;
+    roomVideoCount.textContent = n ? (n + " tile" + (n === 1 ? "" : "s")) : "";
+  }
+
+  function connectPeer(handle, role){
+    if (!roomVid.localStream || !roomVid.self) return null;
+    if (roomVid.peers[handle]) return roomVid.peers[handle];
+    var pc = new RTCPeerConnection(rtcConfig());
+    var videoEl = makeRoomTile(handle, false);
+    var peer = { pc: pc, videoEl: videoEl, role: role };
+    roomVid.peers[handle] = peer;
+    updateRoomCount();
+
+    roomVid.localStream.getTracks().forEach(function(t){ pc.addTrack(t, roomVid.localStream); });
+    pc.onicecandidate = function(e){
+      // Trickle ICE to this peer. Empty candidate = end-of-candidates marker.
+      roomPostSignal(handle, {
+        t: "rtc-ice",
+        candidate: e.candidate && e.candidate.candidate ? e.candidate.candidate : ""
+      });
+    };
+    pc.ontrack = function(e){
+      if (e.streams && e.streams[0]) videoEl.srcObject = e.streams[0];
+    };
+    pc.onconnectionstatechange = function(){
+      // Quiet — closed peers stay in the grid until Leave clears everything.
+    };
+
+    if (role === "offerer") {
+      (async function(){
+        try {
+          var offer = await pc.createOffer();
+          await pc.setLocalDescription(offer);
+          await roomPostSignal(handle, { t: "rtc-offer", sdp: offer.sdp });
+        } catch(e){ /* offer failed — peer will retry on next roster refresh if still present */ }
+      })();
+    }
+    return peer;
+  }
+
+  async function handleRoomSignal(from, rtc){
+    if (!rtc || !from || from === roomVid.self) return;
+    if (rtc.t === "rtc-offer") {
+      var peer = roomVid.peers[from];
+      if (!peer) peer = connectPeer(from, "answerer");
+      if (!peer) return;
+      try {
+        await peer.pc.setRemoteDescription({ type: "offer", sdp: rtc.sdp });
+        var answer = await peer.pc.createAnswer();
+        await peer.pc.setLocalDescription(answer);
+        await roomPostSignal(from, { t: "rtc-answer", sdp: answer.sdp });
+      } catch(e){}
+      return;
+    }
+    if (rtc.t === "rtc-answer") {
+      var pAns = roomVid.peers[from];
+      if (!pAns) return;
+      try { await pAns.pc.setRemoteDescription({ type: "answer", sdp: rtc.sdp }); } catch(e){}
+      return;
+    }
+    if (rtc.t === "rtc-ice") {
+      var pIce = roomVid.peers[from];
+      if (!pIce) return;
+      // Skip empty candidate (end-of-candidates) — browsers tolerate either way.
+      if (!rtc.candidate) return;
+      try { await pIce.pc.addIceCandidate({ candidate: rtc.candidate }); } catch(e){}
+    }
+  }
+
+  async function roomSignalLoop(){
+    if (roomVid.polling) return;
+    roomVid.polling = true;
+    while (roomVid.joined && roomVid.self) {
+      var res;
+      try { res = await roomFetchSignal(roomVid.self, 5000); }
+      catch(e){ await sleep(400); continue; }
+      if (!res || res.status !== 200) { await sleep(400); continue; }
+      var data;
+      try { data = await res.json(); } catch(e){ continue; }
+      var f = data && data.frame;
+      if (!f) continue; // timeout empty
+      // Sender-routed shape: { from, rtc } (or a nested frame.frame fallback).
+      var from = f.from;
+      var rtc = f.rtc || f.frame || f;
+      if (from && rtc && rtc.t) await handleRoomSignal(from, rtc);
+    }
+    roomVid.polling = false;
+  }
+
+  function meshWithMembers(members){
+    if (!roomVid.joined || !roomVid.self || !roomVid.localStream) return;
+    var self = roomVid.self;
+    var seen = {};
+    (members || []).forEach(function(m){
+      var h = m && m.handle;
+      if (!h || h === self) return;
+      seen[h] = true;
+      if (roomVid.peers[h]) return;
+      // Deterministic glare avoidance: lower handle is the offerer.
+      if (self < h) connectPeer(h, "offerer");
+      // else wait for their offer via the long-poll loop
+    });
+  }
+
+  async function joinRoomVideo(){
+    if (roomVid.joined) return;
+    if (!roomVid.self || !roomVid.room) return;
+    roomJoinBtn.disabled = true;
+    try {
+      roomVid.localStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+    } catch(e){
+      roomJoinBtn.disabled = false;
+      roomMeta.textContent = (roomVid.room || "room") + " · camera/mic blocked";
+      return;
+    }
+    roomVid.joined = true;
+    roomVid.peers = {};
+    roomVideoGrid.innerHTML = "";
+    var localEl = makeRoomTile((roomVid.self || "you") + " (you)", true);
+    localEl.srcObject = roomVid.localStream;
+    roomVideo.classList.add("is-open");
+    roomVideoTitle.textContent = "Room · " + roomVid.room;
+    roomLeaveBtn.disabled = false;
+    updateRoomCount();
+    roomSignalLoop();
+    // Seed mesh against the latest roster, then refresh once more for races.
+    meshWithMembers(roomLastRoster);
+    try {
+      var res = await fetch("/api/room");
+      if (res.status === 200) {
+        var data = await res.json();
+        var members = (data && data.members) || [];
+        roomLastRoster = members;
+        meshWithMembers(members);
+      }
+    } catch(e){}
+  }
+
+  function leaveRoomVideo(){
+    roomVid.joined = false;
+    for (var h in roomVid.peers) {
+      if (!Object.prototype.hasOwnProperty.call(roomVid.peers, h)) continue;
+      try { roomVid.peers[h].pc.close(); } catch(e){}
+    }
+    roomVid.peers = {};
+    if (roomVid.localStream) {
+      roomVid.localStream.getTracks().forEach(function(t){ try { t.stop(); } catch(e){} });
+      roomVid.localStream = null;
+    }
+    roomVideoGrid.innerHTML = "";
+    roomVideo.classList.remove("is-open");
+    roomLeaveBtn.disabled = true;
+    roomJoinBtn.disabled = !roomVid.room;
+    updateRoomCount();
+  }
+
+  roomJoinBtn.addEventListener("click", function(){ joinRoomVideo().catch(function(){ leaveRoomVideo(); }); });
+  roomLeaveBtn.addEventListener("click", leaveRoomVideo);
+  roomVideoLeaveBtn.addEventListener("click", leaveRoomVideo);
+
+  async function refreshRoom(){
+    try {
+      var res = await fetch("/api/room");
+      if (res.status !== 200) return;
+      var data = await res.json();
+      var roomName = data && data.room;
+      if (!roomName) {
+        if (roomVid.joined) leaveRoomVideo();
+        roomVid.room = null;
+        roomVid.self = null;
+        roomLastRoster = [];
+        roomPanel.classList.remove("is-open");
+        return;
+      }
+      roomVid.room = roomName;
+      roomVid.self = data.self || null;
+      roomLastRoster = (data.members) || [];
+      var n = roomLastRoster.length;
+      roomMeta.textContent = roomName +
+        (roomVid.self ? " · you " + roomVid.self : "") +
+        " · " + n + " other" + (n === 1 ? "" : "s");
+      roomPanel.classList.add("is-open");
+      roomJoinBtn.disabled = roomVid.joined || !roomVid.self;
+      roomLeaveBtn.disabled = !roomVid.joined;
+      if (roomVid.joined) meshWithMembers(roomLastRoster);
+    } catch(e){}
+  }
+  refreshRoom();
+  setInterval(refreshRoom, 4000);
 })();
 </script>
 </body>
