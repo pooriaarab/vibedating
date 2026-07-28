@@ -31,6 +31,20 @@ export interface IncomingMessage {
   readonly at: number;
 }
 
+/**
+ * A drained message tagged with its sender's handle — for PULL-based consumers
+ * (the MCP `live_poll` tool) that read every inbound message since the last
+ * poll, current or queued, without registering a push callback.
+ */
+export interface PairingMessage {
+  readonly from: string;
+  readonly id: string;
+  readonly text: string;
+  readonly at: number;
+  /** True if this arrived from a NON-current (queued) peer at receive time. */
+  readonly queued: boolean;
+}
+
 export interface LivePairing {
   /** Number of unmatched links waiting in the queue. */
   readonly available: number;
@@ -62,6 +76,13 @@ export interface LivePairing {
    * it is buffered, not dropped. `queued` is that peer's current buffered count.
    */
   onQueued(cb: (from: string, queued: number) => void): void;
+  /**
+   * Pull every inbound message received since the last drain (current + queued),
+   * tagged with sender; empties the buffer. For PULL consumers (MCP live_poll).
+   */
+  drain(): PairingMessage[];
+  /** Snapshot of the currently-queued (non-current) links. */
+  queued(): PeerLink[];
 }
 
 /** ponytail: per-peer buffer cap; oldest dropped beyond it (bound memory). */
@@ -74,6 +95,7 @@ export function createPairing(): LivePairing {
   const msgCbs = new Set<(from: string, m: IncomingMessage) => void>();
   const queuedCbs = new Set<(from: string, queued: number) => void>();
   const buffers = new Map<PeerLink, IncomingMessage[]>();
+  const drainBuffer: PairingMessage[] = [];
   let current: PeerLink | undefined;
 
   const emitMatch = (link: PeerLink | undefined): void => {
@@ -127,6 +149,15 @@ export function createPairing(): LivePairing {
    */
   const bindMessages = (link: PeerLink): void => {
     link.onMessage((m) => {
+      // Accumulate for pull-based consumers (MCP live_poll) — every inbound
+      // message, current or queued, tagged with its sender.
+      drainBuffer.push({
+        from: link.hello.handle,
+        id: m.id,
+        text: m.text,
+        at: m.at,
+        queued: link !== current,
+      });
       if (link === current) {
         deliver(link.hello.handle, m);
       } else {
@@ -183,6 +214,12 @@ export function createPairing(): LivePairing {
     },
     onQueued(cb: (from: string, queued: number) => void): void {
       queuedCbs.add(cb);
+    },
+    drain(): PairingMessage[] {
+      return drainBuffer.splice(0);
+    },
+    queued(): PeerLink[] {
+      return [...queue];
     },
   };
 }
