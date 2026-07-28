@@ -34,7 +34,7 @@ export const MAX_CANDIDATE_LEN = 4 * 1024; // 4 KiB
 const MAX_FRAME_LEN = Math.max(MAX_B64_CHUNK_LEN, 2 * MAX_SDP_LEN) + 2048;
 
 export type Frame =
-  | { t: 'hello'; handle: string; league: string; harness: string }
+  | { t: 'hello'; handle: string; league: string; harness: string; verified?: boolean }
   | { t: 'msg'; id: string; text: string; at: number }
   | { t: 'typing' }
   | { t: 'bye' }
@@ -71,7 +71,18 @@ export function parseFrame(raw: string | Buffer): Frame | null {
     case 'hello': {
       const { handle, league, harness } = r;
       if (typeof handle !== 'string' || typeof league !== 'string') return null;
-      return { t: 'hello', handle, league, harness: typeof harness === 'string' ? harness : 'unknown' };
+      // `verified` is optional (legacy peers omit it) but strictly boolean when
+      // present — it is the self-asserted usage-verification flag, carried so
+      // same-league peers can show an honest ✓ / ~ mark.
+      const verified = r['verified'];
+      if (verified !== undefined && typeof verified !== 'boolean') return null;
+      return {
+        t: 'hello',
+        handle,
+        league,
+        harness: typeof harness === 'string' ? harness : 'unknown',
+        ...(typeof verified === 'boolean' ? { verified } : {}),
+      };
     }
     case 'msg': {
       const id = r['id']; const txt = r['text']; const at = r['at'];

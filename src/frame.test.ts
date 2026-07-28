@@ -32,6 +32,30 @@ describe('frame protocol', () => {
   });
 });
 
+describe('frame protocol — hello verified flag', () => {
+  it('round-trips a hello with verified: true', () => {
+    const f: Frame = { t: 'hello', handle: '@a', league: '10M', harness: 'codex', verified: true };
+    expect(parseFrame(serializeFrame(f))).toEqual(f);
+  });
+  it('round-trips a hello with verified: false', () => {
+    const f: Frame = { t: 'hello', handle: '@a', league: '10M', harness: 'codex', verified: false };
+    expect(parseFrame(serializeFrame(f))).toEqual(f);
+  });
+  it('legacy hello without verified parses with the key absent (backward compat)', () => {
+    const parsed = parseFrame(JSON.stringify({ t: 'hello', handle: '@a', league: '10M' }));
+    expect(parsed).toEqual({ t: 'hello', handle: '@a', league: '10M', harness: 'unknown' });
+    expect(parsed).not.toHaveProperty('verified');
+  });
+  it('rejects a non-boolean verified (allowlist rigor)', () => {
+    expect(
+      parseFrame(JSON.stringify({ t: 'hello', handle: '@a', league: '10M', verified: 'yes' })),
+    ).toBeNull();
+    expect(
+      parseFrame(JSON.stringify({ t: 'hello', handle: '@a', league: '10M', verified: 1 })),
+    ).toBeNull();
+  });
+});
+
 describe('frame protocol — media frames', () => {
   it('round-trips a media-start frame', () => {
     const f: Frame = { t: 'media-start', id: 'm1', mime: 'image/png', size: 1234, name: 'cat.png' };

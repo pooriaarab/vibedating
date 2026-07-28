@@ -29,7 +29,7 @@
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.0.0",
-    "@pooriaarab/vibe-core": "^0.2.0",
+    "@pooriaarab/vibe-core": "^0.3.0",
     "hyperswarm": "^4.17.0"
   },
   "devDependencies": {
