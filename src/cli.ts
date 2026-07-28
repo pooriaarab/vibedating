@@ -23,7 +23,7 @@ import { createLiveBridge, startServer, type LiveBridge } from './server.js';
 import { runMcp } from './mcp.js';
 
 /** Mirrors package.json version (kept here; package.json imports are brittle under bundling). */
-const VERSION = '0.2.0';
+const VERSION = '0.2.1';
 
 /** Recognized top-level commands, plus the synthetic help/version. */
 export type Command =
@@ -241,15 +241,26 @@ async function cmdOpen(port: number | undefined): Promise<number> {
   if (profile) {
     if (!canShareLive()) grantLiveConsent();
     live = createLiveBridge();
+  }
+  // Serve the web app FIRST — it must load instantly and work OFFLINE. Live
+  // discovery joins the DHT in the BACKGROUND: bootstrap can be slow, or with
+  // no network never complete, and the local app must never wait on it.
+  const started = await startServer({ port, live });
+  if (profile && live) {
+    process.stdout.write(`\n  ${LIVE_NOTICE}\n`);
     const hello: PeerHello = {
       handle: profile.handle,
       league: profile.league,
       harness: profile.harness,
     };
-    process.stdout.write(`\n  ${LIVE_NOTICE}\n`);
-    session = await startDiscovery({ hello, onLink: (link) => live!.addLink(link) });
+    void startDiscovery({ hello, onLink: (link) => live!.addLink(link) })
+      .then((s) => {
+        session = s;
+      })
+      .catch(() => {
+        /* offline / DHT unreachable — web app still works, video just has no peers yet */
+      });
   }
-  const started = await startServer({ port, live });
   process.stdout.write(`\n  vibedating local web app → ${started.url}\n`);
   if (live) {
     process.stdout.write('  • live A/V (video) available for connected same-league peers\n');
