@@ -35,7 +35,8 @@ import {
   type DiscoverySession,
   type PeerHello,
 } from './p2p.js';
-import { loadOrCreateIdentity, signHelloClaims } from './identity.js';
+import { loadOrCreateIdentity, loadOrCreateNostrKey, signHelloClaims } from './identity.js';
+import { createNostrPoolTransport, createNostrRelayLink } from './relay.js';
 import { ensureHandle } from './handlegen.js';
 import { sanitizePeerText } from './untrusted.js';
 import {
@@ -68,7 +69,7 @@ import { createLiveBridge, startServer, type LiveBridge } from './server.js';
 import { runMcp } from './mcp.js';
 
 /** Mirrors package.json version (kept here; package.json imports are brittle under bundling). */
-const VERSION = '0.5.0';
+const VERSION = '0.6.0';
 
 /** Recognized top-level commands, plus the synthetic help/version. */
 export type Command =
@@ -104,6 +105,12 @@ export interface ParsedArgs {
   readonly to: string | undefined;
   /** `live --keep-alive`: stay in the swarm after stdin EOF. Default false. */
   readonly keepAlive: boolean;
+  /**
+   * `live --via-relay` / `discover --via-relay`: route through public Nostr relays
+   * (NIP-04 e2e) when direct hyperdht hole-punching fails. v0 explicit opt-in;
+   * auto-fallback-on-timeout is a follow-up. Default false.
+   */
+  readonly viaRelay: boolean;
 }
 
 function parsePort(raw: string): number | undefined {
@@ -126,6 +133,7 @@ export function parseArgs(argv: readonly string[]): ParsedArgs {
     arg: undefined,
     to: undefined,
     keepAlive: false,
+    viaRelay: false,
   };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i]!;
@@ -139,6 +147,7 @@ export function parseArgs(argv: readonly string[]): ParsedArgs {
         arg: undefined,
         to: undefined,
         keepAlive: false,
+        viaRelay: false,
       };
     }
     if (a === '--help' || a === '-h') {
@@ -151,6 +160,7 @@ export function parseArgs(argv: readonly string[]): ParsedArgs {
         arg: undefined,
         to: undefined,
         keepAlive: false,
+        viaRelay: false,
       };
     }
     if (a === '--live') {
@@ -159,6 +169,10 @@ export function parseArgs(argv: readonly string[]): ParsedArgs {
     }
     if (a === '--keep-alive') {
       out = { ...out, keepAlive: true };
+      continue;
+    }
+    if (a === '--via-relay') {
+      out = { ...out, viaRelay: true };
       continue;
     }
     if (a === '--any') {
@@ -461,7 +475,7 @@ async function cmdMatches(live: boolean): Promise<number> {
   return 0;
 }
 
-async function cmdDiscover(live: boolean, any: boolean): Promise<number> {
+async function cmdDiscover(live: boolean, any: boolean, viaRelay: boolean): Promise<number> {
   const profile = loadProfile();
   if (!profile) {
     process.stderr.write('Not connected yet. Run `vibedating connect` first.\n');
@@ -482,6 +496,9 @@ async function cmdDiscover(live: boolean, any: boolean): Promise<number> {
   process.stdout.write('\n');
   process.stdout.write(`  ${LIVE_NOTICE}\n`);
   process.stdout.write(`  ${MARKS_LEGEND}\n`);
+  if (viaRelay) {
+    process.stdout.write('  • --via-relay: the relay fallback reaches a KNOWN peer over Nostr — use `live --via-relay --to @handle`\n');
+  }
 
   const { topics, acceptLeague } = discoveryScope(profile.league, any);
   const session = await startDiscovery({
@@ -595,6 +612,116 @@ export function shouldKeepAlive(flag: boolean, stdinIsTTY: boolean | undefined):
 }
 
 /**
+ * `vibedating live --via-relay [--to @handle]` — chat over the Nostr-relay
+ * FALLBACK when direct hyperdht hole-punching fails (symmetric NATs). v0 is
+ * TARGETED: reach ONE known peer (a handle previously discovered and recorded
+ * in peers.json with an ed25519 pubkey) over public relays. Relay omegle
+ * (finding brand-new peers over Nostr) is a `// ponytail:` follow-up, as is
+ * auto-fallback on a hole-punch timeout. The readline loop is intentionally
+ * separate from cmdLive so the proven direct path is untouched.
+ */
+async function cmdLiveViaRelay(profile: ProfileState, to: string | undefined): Promise<number> {
+  const target = to !== undefined ? normalizeHandle(to) : null;
+  if (to !== undefined && target === null) {
+    process.stderr.write(`invalid target handle: ${to}\n`);
+    return 1;
+  }
+  if (target === null) {
+    process.stderr.write(
+      'relay mode (v0) targets one known peer — use: vibedating live --via-relay --to <@handle>\n' +
+        '(discover the peer first with `vibedating discover --live`, then reach them over the relay).\n',
+    );
+    return 1;
+  }
+  // The relay rendezvous tag is derived from BOTH ed25519 pubkeys, so the peer
+  // must be known AND carry an identity pubkey (recorded by a prior discovery).
+  const peer = loadPeers().find((p) => sameHandle(p.handle, target) && typeof p.pubkey === 'string');
+  if (peer === undefined || peer.pubkey === undefined) {
+    process.stderr.write(
+      `${target} is not a known peer with an identity pubkey. Run \`vibedating discover --live\` first to meet them over the DHT, then retry --via-relay.\n`,
+    );
+    return 1;
+  }
+
+  const identity = loadOrCreateIdentity();
+  process.stdout.write('\n');
+  process.stdout.write(`  ${LIVE_NOTICE}\n`);
+  process.stdout.write(
+    `  routing e2e chat to ${sanitizePeerText(peer.handle)} through public Nostr relays (direct hole-punch fallback)\n`,
+  );
+  process.stdout.write('  • the relay stores only ciphertext — it cannot read your chat\n');
+
+  // Lazy: loads nostr-tools + opens wss:// to the public commons relays. The
+  // separate secp256k1 Nostr key (never the ed25519 identity) drives NIP-04.
+  const myNostr = await loadOrCreateNostrKey();
+  const transport = await createNostrPoolTransport();
+  const link = await createNostrRelayLink({
+    myNostr,
+    myEd25519Hex: identity.publicKeyHex,
+    peerEd25519Hex: peer.pubkey,
+    hello: peer,
+    transport,
+  });
+
+  const pairing = createPairing();
+  pairing.onMatch((l) => {
+    if (l === undefined) {
+      process.stdout.write('  · relay peer gone\n');
+      return;
+    }
+    const { qual } = peerDirection(profile.league, l.hello.league);
+    process.stdout.write(
+      `  · relayed to ${sanitizePeerText(l.hello.handle)} (${l.hello.league}${qual} · ${l.hello.harness}) ${usageMark(l.hello)}${idMark(l.hello)}\n`,
+    );
+    l.onMessage((m) => {
+      // AEGIS-lite: chat text is UNTRUSTED display data — sanitized before print.
+      process.stdout.write(`  <${sanitizePeerText(l.hello.handle)}> ${sanitizePeerText(m.text)}\n`);
+    });
+  });
+  pairing.add(link);
+
+  process.stdout.write('  type to chat · /quit\n');
+  process.stdout.write('  (Ctrl+C to stop)\n\n');
+
+  const rl = readline.createInterface({ input: process.stdin, terminal: false });
+  const stop = (): void => {
+    rl.close();
+  };
+  process.once('SIGINT', stop);
+  process.once('SIGTERM', stop);
+
+  let quitRequested = false;
+  for await (const line of rl) {
+    const text = line.trim();
+    if (text === '/quit') {
+      quitRequested = true;
+      break;
+    }
+    if (text === '/next') {
+      process.stdout.write('  · relay mode targets one peer — /next re-announces presence\n');
+      continue;
+    }
+    if (text === '') continue;
+    const cur = pairing.current();
+    if (cur !== undefined) {
+      cur.send(text);
+    } else {
+      process.stdout.write('  · no relay peer yet — waiting for the presence exchange…\n');
+    }
+  }
+
+  process.removeListener('SIGINT', stop);
+  process.removeListener('SIGTERM', stop);
+  void quitRequested;
+  const cur = pairing.current();
+  if (cur !== undefined) cur.close();
+  process.stdout.write('\n  closing relay link…\n');
+  link.close();
+  process.stdout.write('\n');
+  return 0;
+}
+
+/**
  * `vibedating live [--dating]` — live text chat with same-league peers.
  *
  * Omegle by default (auto-pair; `/next` rolls a new peer). `--dating` advertises
@@ -609,6 +736,7 @@ async function cmdLive(
   any: boolean,
   to: string | undefined,
   keepAlive: boolean,
+  viaRelay: boolean,
 ): Promise<number> {
   const profile = loadProfile();
   if (!profile) {
@@ -627,6 +755,10 @@ async function cmdLive(
     process.stderr.write('Could not enable live discovery. Try `vibedating discover --live`.\n');
     return 1;
   }
+
+  // v0 explicit opt-in: route through public Nostr relays instead of the DHT.
+  // // ponytail: auto-fallback when a direct hole-punch times out.
+  if (viaRelay) return cmdLiveViaRelay(profile, to);
 
   const hello = buildHello(profile);
   process.stdout.write('\n');
@@ -1001,10 +1133,11 @@ Usage:
   vibedating connect            Read your usage, compute + print your league
   vibedating matches [--live]   List candidates in your league (live peers if any)
   vibedating discover [--live] [--any]  Find live peers over the DHT (your league + adjacent; --any = everyone)
-  vibedating live [--dating] [--any] [--to @handle] [--keep-alive]  Live chat (your league
+  vibedating live [--dating] [--any] [--to @handle] [--keep-alive] [--via-relay]  Live chat (your league
                                 + adjacent; --any = everyone; /next or --dating pick;
                                 --to targets one peer; --keep-alive survives stdin EOF —
-                                automatic when stdin is not a TTY)
+                                automatic when stdin is not a TTY; --via-relay routes e2e chat
+                                through public Nostr relays when direct hole-punching fails)
   vibedating find <@handle> [--any]  Search the DHT for one specific handle (★ highlights a match)
   vibedating handle [@name]     Print or set your handle (persisted; a leading '@' is optional)
   vibedating block <@handle>    Block a handle — their hello is dropped (never recorded/paired)
@@ -1067,11 +1200,11 @@ async function main(argv: readonly string[]): Promise<number> {
     case 'matches':
       return cmdMatches(parsed.live);
     case 'discover':
-      return cmdDiscover(parsed.live, parsed.any);
+      return cmdDiscover(parsed.live, parsed.any, parsed.viaRelay);
     case 'open':
       return cmdOpen(parsed.port, parsed.any);
     case 'live':
-      return cmdLive(parsed.dating, parsed.any, parsed.to, parsed.keepAlive);
+      return cmdLive(parsed.dating, parsed.any, parsed.to, parsed.keepAlive, parsed.viaRelay);
     case 'find':
       return cmdFind(parsed.arg, parsed.any);
     case 'mcp':

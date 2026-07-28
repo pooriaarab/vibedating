@@ -188,3 +188,87 @@ export function classifyHelloIdentity(hello: HelloClaims & Partial<IdentityProof
     ? 'verified'
     : 'drop';
 }
+
+/* -------------------------------------------------------------------------- */
+/* Persistent Nostr (secp256k1) key — for the relay fallback's NIP-04 e2e.    */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * A separate secp256k1 keypair for the Nostr relay fallback (see relay.ts).
+ * Kept DISTINCT from the ed25519 {@link Identity} on purpose: NIP-04 encryption
+ * requires a secp256k1 key, and reusing or deriving the ed25519 key for that
+ * would cross two unrelated cryptographic curves. The private key is persisted
+ * at `<dir>/nostr.json` (mode 0600) and never leaves the file; only the
+ * secp256k1 public key (hex) is ever published on a relay.
+ */
+export interface NostrKey {
+  /** 32-byte secp256k1 secret key — the NIP-04 decrypt/encrypt key. Never sent. */
+  readonly sk: Uint8Array;
+  /** secp256k1 public key, hex (64 chars) — safe to publish; the relay sees it. */
+  readonly pubkey: string;
+}
+
+/** The file under the state dir holding the persistent Nostr secp256k1 key (0600). */
+const NOSTR_FILE = 'nostr.json';
+
+function nostrPath(dir: string): string {
+  return path.join(dir, NOSTR_FILE);
+}
+
+function isStoredNostrKey(
+  data: unknown,
+): data is { sk: string; pubkey: string; createdAt: string } {
+  if (typeof data !== 'object' || data === null) return false;
+  const r = data as Record<string, unknown>;
+  return (
+    typeof r['sk'] === 'string' &&
+    /^[0-9a-f]{64}$/.test(r['sk']) &&
+    typeof r['pubkey'] === 'string' &&
+    /^[0-9a-f]{64}$/.test(r['pubkey']) &&
+    typeof r['createdAt'] === 'string'
+  );
+}
+
+/**
+ * Load the persistent secp256k1 Nostr key, generating + storing it (mode 0600)
+ * on first use. A missing or corrupt file is (re)generated — never throws on
+ * disk content. Idempotent across runs: same file → same key. `nostr-tools` is
+ * imported LAZILY (only when a key must be generated) so non-relay commands
+ * never pay for the secp256k1 stack.
+ */
+export async function loadOrCreateNostrKey(dir: string = defaultStateDir()): Promise<NostrKey> {
+  // The persisted file is the common case (already generated) — read it without
+  // touching nostr-tools so existing relayers stay fast.
+  try {
+    const raw = readFileSync(nostrPath(dir), 'utf8');
+    const data: unknown = JSON.parse(raw);
+    if (isStoredNostrKey(data)) {
+      try {
+        chmodSync(nostrPath(dir), 0o600);
+      } catch {
+        /* best-effort mode hardening on read */
+      }
+      return { sk: Buffer.from(data.sk, 'hex'), pubkey: data.pubkey };
+    }
+  } catch {
+    /* missing or corrupt — fall through and (re)generate */
+  }
+  // Lazy import: only the first relay use (or a corrupt file) loads nostr-tools.
+  const { generateSecretKey, getPublicKey } = await import('nostr-tools');
+  const sk = generateSecretKey();
+  const pubkey = getPublicKey(sk);
+  const skHex = Buffer.from(sk).toString('hex');
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(
+    nostrPath(dir),
+    JSON.stringify({ sk: skHex, pubkey, createdAt: new Date().toISOString() }, null, 2) + '\n',
+    { encoding: 'utf8', mode: 0o600 },
+  );
+  // mode on write applies only to new files — force it for a pre-existing one.
+  try {
+    chmodSync(nostrPath(dir), 0o600);
+  } catch {
+    /* best-effort hardening; the file content is still valid */
+  }
+  return { sk, pubkey };
+}
