@@ -235,6 +235,22 @@ function formatTokens(n: number): string {
 }
 
 /**
+ * Compact relative time for local lists: an ISO timestamp → "just now" /
+ * "5m ago" / "3h ago" / "2d ago". Unparseable input → "unknown". Pure.
+ */
+export function formatAgo(iso: string, now: Date = new Date()): string {
+  const t = Date.parse(iso);
+  if (Number.isNaN(t)) return 'unknown';
+  const s = Math.max(0, Math.floor((now.getTime() - t) / 1000));
+  if (s < 60) return 'just now';
+  const m = Math.floor(s / 60);
+  if (m < 60) return `${m}m ago`;
+  const h = Math.floor(m / 60);
+  if (h < 24) return `${h}h ago`;
+  return `${Math.floor(h / 24)}d ago`;
+}
+
+/**
  * Honest verification line for `connect` — where the usage number ACTUALLY came
  * from. Only `source === 'real'` (the harness's own local logs, read by
  * vibe-core) is "verified"; self-report and demo are labeled as what they are.
@@ -410,7 +426,9 @@ async function cmdMatches(live: boolean): Promise<number> {
     );
     process.stdout.write(`  ${MARKS_LEGEND}\n\n`);
     for (const p of livePeers) {
-      process.stdout.write(`  ${p.handle.padEnd(28)} ${p.league} · ${p.harness} ${usageMark(p)}${idMark(p)}\n`);
+      // lastMessageAt is local metadata (set when a msg arrived from them).
+      const lastMsg = p.lastMessageAt !== undefined ? ` · last msg ${formatAgo(p.lastMessageAt)}` : '';
+      process.stdout.write(`  ${p.handle.padEnd(28)} ${p.league} · ${p.harness} ${usageMark(p)}${idMark(p)}${lastMsg}\n`);
     }
     process.stdout.write('\n');
     return 0;
