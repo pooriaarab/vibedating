@@ -1,12 +1,14 @@
 {
   "name": "vibedate",
-  "version": "0.2.1",
+  "version": "0.3.0",
   "description": "Dating by tokens — matched by usage league across agentic CLIs. Raw usage stays local; only your league is shared. CLI + local web app + MCP. Local-first.",
   "type": "module",
   "license": "MIT",
   "author": "Pooria Arab",
   "bin": {
-    "vibedating": "./dist/cli.js"
+    "vibedate": "./dist/cli.js",
+    "vibedating": "./dist/cli.js",
+    "vibedate-mcp": "./dist/mcp.js"
   },
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
