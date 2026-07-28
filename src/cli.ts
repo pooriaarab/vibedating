@@ -99,6 +99,8 @@ export interface ParsedArgs {
   readonly arg: string | undefined;
   /** `live --to <@handle>`: targeted match — auto-open that specific peer. */
   readonly to: string | undefined;
+  /** `live --keep-alive`: stay in the swarm after stdin EOF. Default false. */
+  readonly keepAlive: boolean;
 }
 
 function parsePort(raw: string): number | undefined {
@@ -120,6 +122,7 @@ export function parseArgs(argv: readonly string[]): ParsedArgs {
     any: false,
     arg: undefined,
     to: undefined,
+    keepAlive: false,
   };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i]!;
@@ -132,6 +135,7 @@ export function parseArgs(argv: readonly string[]): ParsedArgs {
         any: false,
         arg: undefined,
         to: undefined,
+        keepAlive: false,
       };
     }
     if (a === '--help' || a === '-h') {
@@ -143,10 +147,15 @@ export function parseArgs(argv: readonly string[]): ParsedArgs {
         any: false,
         arg: undefined,
         to: undefined,
+        keepAlive: false,
       };
     }
     if (a === '--live') {
       out = { ...out, live: true };
+      continue;
+    }
+    if (a === '--keep-alive') {
+      out = { ...out, keepAlive: true };
       continue;
     }
     if (a === '--any') {
@@ -548,6 +557,17 @@ async function cmdOpen(port: number | undefined, any: boolean): Promise<number> 
 }
 
 /**
+ * Whether `live` should stay in the swarm after stdin closes. An explicit
+ * `--keep-alive` always keeps it; otherwise AUTO-detect: a non-TTY stdin
+ * (piped, `</dev/null`, backgrounded) hits EOF immediately, and exiting there
+ * would kill an unattended session — so it stays up until SIGINT/SIGTERM.
+ * Interactive TTY behavior is unchanged: Ctrl+D / EOF still exits.
+ */
+export function shouldKeepAlive(flag: boolean, stdinIsTTY: boolean | undefined): boolean {
+  return flag || stdinIsTTY !== true;
+}
+
+/**
  * `vibedating live [--dating]` — live text chat with same-league peers.
  *
  * Omegle by default (auto-pair; `/next` rolls a new peer). `--dating` advertises
@@ -557,7 +577,12 @@ async function cmdOpen(port: number | undefined, any: boolean): Promise<number> 
  * protocol + pairing policy are unit tested; this readline loop is manual-smoke
  * only.
  */
-async function cmdLive(dating: boolean, any: boolean, to: string | undefined): Promise<number> {
+async function cmdLive(
+  dating: boolean,
+  any: boolean,
+  to: string | undefined,
+  keepAlive: boolean,
+): Promise<number> {
   const profile = loadProfile();
   if (!profile) {
     process.stderr.write('Not connected yet. Run `vibedating connect` first.\n');
@@ -642,9 +667,13 @@ async function cmdLive(dating: boolean, any: boolean, to: string | undefined): P
   process.once('SIGINT', stop);
   process.once('SIGTERM', stop);
 
+  let quitRequested = false;
   for await (const line of rl) {
     const text = line.trim();
-    if (text === '/quit') break;
+    if (text === '/quit') {
+      quitRequested = true;
+      break;
+    }
     if (text === '/next') {
       pairing.next();
       continue;
@@ -663,6 +692,18 @@ async function cmdLive(dating: boolean, any: boolean, to: string | undefined): P
     } else {
       process.stdout.write('  · no peer yet — waiting for a match…\n');
     }
+  }
+
+  // The readline loop ended via stdin EOF (not /quit). With --keep-alive — or
+  // automatically when stdin is not a TTY (piped/backgrounded, where EOF is
+  // immediate) — stay in the swarm instead of dying: an unattended session
+  // must keep matching until it is explicitly signaled.
+  if (!quitRequested && shouldKeepAlive(keepAlive, process.stdin.isTTY)) {
+    process.stdout.write('  stdin closed — staying in the swarm (Ctrl+C / SIGTERM to leave)\n');
+    await new Promise<void>((resolve) => {
+      process.once('SIGINT', () => resolve());
+      process.once('SIGTERM', () => resolve());
+    });
   }
 
   process.removeListener('SIGINT', stop);
@@ -912,7 +953,10 @@ Usage:
   vibedating connect            Read your usage, compute + print your league
   vibedating matches [--live]   List candidates in your league (live peers if any)
   vibedating discover [--live] [--any]  Find live peers over the DHT (your league + adjacent; --any = everyone)
-  vibedating live [--dating] [--any] [--to @handle]  Live chat (your league + adjacent; --any = everyone; /next or --dating pick; --to targets one peer)
+  vibedating live [--dating] [--any] [--to @handle] [--keep-alive]  Live chat (your league
+                                + adjacent; --any = everyone; /next or --dating pick;
+                                --to targets one peer; --keep-alive survives stdin EOF —
+                                automatic when stdin is not a TTY)
   vibedating find <@handle> [--any]  Search the DHT for one specific handle (★ highlights a match)
   vibedating handle [@name]     Print or set your handle (persisted; a leading '@' is optional)
   vibedating block <@handle>    Block a handle — their hello is dropped (never recorded/paired)
@@ -976,7 +1020,7 @@ async function main(argv: readonly string[]): Promise<number> {
     case 'open':
       return cmdOpen(parsed.port, parsed.any);
     case 'live':
-      return cmdLive(parsed.dating, parsed.any, parsed.to);
+      return cmdLive(parsed.dating, parsed.any, parsed.to, parsed.keepAlive);
     case 'find':
       return cmdFind(parsed.arg, parsed.any);
     case 'mcp':

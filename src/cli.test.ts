@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { parseArgs } from './cli.js';
+import { parseArgs, shouldKeepAlive } from './cli.js';
 
 describe('parseArgs — commands', () => {
   it('recognizes each subcommand', () => {
@@ -23,8 +23,8 @@ describe('parseArgs — --live opt-in flag', () => {
   });
 
   it('sets live on discover and matches', () => {
-    expect(parseArgs(['discover', '--live'])).toEqual({ command: 'discover', port: undefined, live: true, dating: false, any: false });
-    expect(parseArgs(['--live', 'matches'])).toEqual({ command: 'matches', port: undefined, live: true, dating: false, any: false });
+    expect(parseArgs(['discover', '--live'])).toEqual({ command: 'discover', port: undefined, live: true, dating: false, any: false, keepAlive: false });
+    expect(parseArgs(['--live', 'matches'])).toEqual({ command: 'matches', port: undefined, live: true, dating: false, any: false, keepAlive: false });
   });
 
   it('combines with --port', () => {
@@ -34,6 +34,7 @@ describe('parseArgs — --live opt-in flag', () => {
       live: true,
       dating: false,
       any: false,
+      keepAlive: false,
     });
   });
 });
@@ -56,21 +57,21 @@ describe('parseArgs — version / help flags', () => {
 
 describe('parseArgs — open --port', () => {
   it('accepts --port <n>', () => {
-    expect(parseArgs(['open', '--port', '8080'])).toEqual({ command: 'open', port: 8080, live: false, dating: false, any: false });
+    expect(parseArgs(['open', '--port', '8080'])).toEqual({ command: 'open', port: 8080, live: false, dating: false, any: false, keepAlive: false });
   });
 
   it('accepts --port=<n>', () => {
-    expect(parseArgs(['open', '--port=8080'])).toEqual({ command: 'open', port: 8080, live: false, dating: false, any: false });
+    expect(parseArgs(['open', '--port=8080'])).toEqual({ command: 'open', port: 8080, live: false, dating: false, any: false, keepAlive: false });
   });
 
   it('rejects out-of-range / non-numeric ports (undefined, command intact)', () => {
-    expect(parseArgs(['open', '--port', 'nope'])).toEqual({ command: 'open', port: undefined, live: false, dating: false, any: false });
+    expect(parseArgs(['open', '--port', 'nope'])).toEqual({ command: 'open', port: undefined, live: false, dating: false, any: false, keepAlive: false });
     expect(parseArgs(['open', '--port', '0']).port).toBeUndefined();
     expect(parseArgs(['open', '--port', '70000']).port).toBeUndefined();
   });
 
   it('ignores --port with no following value', () => {
-    expect(parseArgs(['open', '--port'])).toEqual({ command: 'open', port: undefined, live: false, dating: false, any: false });
+    expect(parseArgs(['open', '--port'])).toEqual({ command: 'open', port: undefined, live: false, dating: false, any: false, keepAlive: false });
   });
 });
 
@@ -101,6 +102,7 @@ describe('parseArgs — live --dating', () => {
       live: false,
       dating: true,
       any: false,
+      keepAlive: false,
     });
   });
 
@@ -111,6 +113,7 @@ describe('parseArgs — live --dating', () => {
       live: true,
       dating: true,
       any: false,
+      keepAlive: false,
     });
   });
 });
@@ -225,6 +228,7 @@ describe('parseArgs — --any flag', () => {
       live: false,
       dating: false,
       any: true,
+      keepAlive: false,
     });
     expect(parseArgs(['live', '--any'])).toEqual({
       command: 'live',
@@ -232,6 +236,7 @@ describe('parseArgs — --any flag', () => {
       live: false,
       dating: false,
       any: true,
+      keepAlive: false,
     });
   });
 
@@ -242,6 +247,7 @@ describe('parseArgs — --any flag', () => {
       live: false,
       dating: false,
       any: true,
+      keepAlive: false,
     });
     expect(parseArgs(['open', '--any', '--port', '8080'])).toEqual({
       command: 'open',
@@ -249,6 +255,7 @@ describe('parseArgs — --any flag', () => {
       live: false,
       dating: false,
       any: true,
+      keepAlive: false,
     });
     expect(parseArgs(['open']).any).toBe(false);
   });
@@ -260,6 +267,7 @@ describe('parseArgs — --any flag', () => {
       live: true,
       dating: false,
       any: true,
+      keepAlive: false,
     });
     expect(parseArgs(['live', '--dating', '--any'])).toEqual({
       command: 'live',
@@ -267,6 +275,39 @@ describe('parseArgs — --any flag', () => {
       live: false,
       dating: true,
       any: true,
+      keepAlive: false,
     });
+  });
+});
+
+describe('parseArgs — live --keep-alive', () => {
+  it('defaults to false', () => {
+    expect(parseArgs(['live']).keepAlive).toBe(false);
+    expect(parseArgs(['discover']).keepAlive).toBe(false);
+  });
+
+  it('sets keepAlive', () => {
+    expect(parseArgs(['live', '--keep-alive']).keepAlive).toBe(true);
+    expect(parseArgs(['live', '--keep-alive', '--any'])).toMatchObject({
+      command: 'live',
+      keepAlive: true,
+      any: true,
+    });
+  });
+});
+
+describe('shouldKeepAlive() — the EOF policy', () => {
+  it('interactive TTY without the flag exits on EOF (legacy behavior)', () => {
+    expect(shouldKeepAlive(false, true)).toBe(false);
+  });
+
+  it('an explicit --keep-alive stays even on a TTY', () => {
+    expect(shouldKeepAlive(true, true)).toBe(true);
+  });
+
+  it('non-TTY stdin auto-keeps-alive (piped / </dev/null / backgrounded)', () => {
+    expect(shouldKeepAlive(false, undefined)).toBe(true);
+    expect(shouldKeepAlive(false, false)).toBe(true);
+    expect(shouldKeepAlive(true, undefined)).toBe(true);
   });
 });
