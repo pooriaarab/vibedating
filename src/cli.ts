@@ -35,7 +35,15 @@ import {
   type PeerHello,
 } from './p2p.js';
 import { createPairing } from './pairing.js';
-import { canShareLive, connectProfile, grantLiveConsent, loadProfile } from './state.js';
+import {
+  canShareLive,
+  connectProfile,
+  grantLiveConsent,
+  loadProfile,
+  normalizeHandle,
+  resolveHandle,
+  saveHandle,
+} from './state.js';
 import { createLiveBridge, startServer, type LiveBridge } from './server.js';
 import { runMcp } from './mcp.js';
 
@@ -49,6 +57,7 @@ export type Command =
   | 'discover'
   | 'open'
   | 'live'
+  | 'handle'
   | 'mcp'
   | 'help'
   | 'version'
@@ -64,6 +73,8 @@ export interface ParsedArgs {
   readonly dating: boolean;
   /** `discover --any` / `live --any`: match every league (not just ±1). Default false. */
   readonly any: boolean;
+  /** Positional argument for `handle` (e.g. `@name`). */
+  readonly arg: string | undefined;
 }
 
 function parsePort(raw: string): number | undefined {
@@ -77,14 +88,35 @@ function parsePort(raw: string): number | undefined {
  * Pure: no IO, no process access — trivially unit-testable.
  */
 export function parseArgs(argv: readonly string[]): ParsedArgs {
-  let out: ParsedArgs = { command: null, port: undefined, live: false, dating: false, any: false };
+  let out: ParsedArgs = {
+    command: null,
+    port: undefined,
+    live: false,
+    dating: false,
+    any: false,
+    arg: undefined,
+  };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i]!;
     if (a === '--version' || a === '-v') {
-      return { command: 'version', port: undefined, live: false, dating: false, any: false };
+      return {
+        command: 'version',
+        port: undefined,
+        live: false,
+        dating: false,
+        any: false,
+        arg: undefined,
+      };
     }
     if (a === '--help' || a === '-h') {
-      return { command: 'help', port: undefined, live: false, dating: false, any: false };
+      return {
+        command: 'help',
+        port: undefined,
+        live: false,
+        dating: false,
+        any: false,
+        arg: undefined,
+      };
     }
     if (a === '--live') {
       out = { ...out, live: true };
@@ -119,12 +151,17 @@ export function parseArgs(argv: readonly string[]): ParsedArgs {
       a === 'discover' ||
       a === 'open' ||
       a === 'live' ||
+      a === 'handle' ||
       a === 'mcp' ||
       a === 'help'
         ? a
         : null;
     if (known !== null && out.command === null) {
       out = { ...out, command: known };
+    } else if (out.arg === undefined) {
+      // First positional after the command → the command's argument
+      // (e.g. `handle @name`).
+      out = { ...out, arg: a };
     }
   }
   return out;
@@ -178,7 +215,7 @@ function peerDirection(
 
 async function cmdConnect(): Promise<number> {
   const harness: Harness = (process.env['VIBEDATING_HARNESS'] as Harness | undefined) ?? 'claude-code';
-  const handle = process.env['VIBEDATING_HANDLE'] ?? '@you';
+  const handle = resolveHandle();
   const snapshot = await readUsage(harness);
   const profile = connectProfile(snapshot, handle);
   const lg = league(snapshot.totalTokens);
@@ -191,6 +228,32 @@ async function cmdConnect(): Promise<number> {
   process.stdout.write('\n');
   process.stdout.write('  • raw usage stays local · only league shared\n\n');
   return 0;
+}
+
+/**
+ * `vibedate handle` → print the effective handle (env override > persisted >
+ * default). `vibedate handle @name` → validate + persist it to
+ * `~/.vibedating/handle.json` (and mirror onto an existing profile). A leading
+ * '@' is optional; the canonical form always has one.
+ */
+async function cmdHandle(arg: string | undefined): Promise<number> {
+  if (arg === undefined || arg.trim() === '') {
+    const handle = resolveHandle();
+    process.stdout.write(`${handle}\n`);
+    const env = process.env['VIBEDATING_HANDLE'];
+    if (env !== undefined && env.trim() !== '' && normalizeHandle(env) !== null) {
+      process.stdout.write('  (env VIBEDATING_HANDLE overrides the persisted handle for this run)\n');
+    }
+    return 0;
+  }
+  try {
+    const canonical = saveHandle(arg);
+    process.stdout.write(`  handle set → ${canonical}  (saved to ~/.vibedating/handle.json)\n`);
+    return 0;
+  } catch (err) {
+    process.stderr.write(`${err instanceof Error ? err.message : String(err)}\n`);
+    return 1;
+  }
 }
 
 async function cmdMatches(live: boolean): Promise<number> {
@@ -261,7 +324,7 @@ async function cmdDiscover(live: boolean, any: boolean): Promise<number> {
   }
 
   const hello: PeerHello = {
-    handle: profile.handle,
+    handle: resolveHandle(),
     league: profile.league,
     harness: profile.harness,
   };
@@ -328,7 +391,7 @@ async function cmdOpen(port: number | undefined): Promise<number> {
   if (profile && live) {
     process.stdout.write(`\n  ${LIVE_NOTICE}\n`);
     const hello: PeerHello = {
-      handle: profile.handle,
+      handle: resolveHandle(),
       league: profile.league,
       harness: profile.harness,
     };
@@ -381,7 +444,7 @@ async function cmdLive(dating: boolean, any: boolean): Promise<number> {
   }
 
   const hello: PeerHello = {
-    handle: profile.handle,
+    handle: resolveHandle(),
     league: profile.league,
     harness: profile.harness,
   };
@@ -470,6 +533,7 @@ Usage:
   vibedating matches [--live]   List candidates in your league (live peers if any)
   vibedating discover [--live] [--any]  Find live peers over the DHT (your league + adjacent; --any = everyone)
   vibedating live [--dating] [--any]    Live chat (your league + adjacent; --any = everyone; /next or --dating pick)
+  vibedating handle [@name]     Print or set your handle (persisted; a leading '@' is optional)
   vibedating open [--port N]    Serve the local web app (default: random port)
                                 + live A/V video with connected same-league peers
   vibedating mcp                Run the stdio MCP server (profile, matches)
@@ -488,7 +552,7 @@ Matching:
 Env:
   VIBEDATING_TOKENS=<n>   Self-report a token count (e.g. 23400000 or 12M)
   VIBEDATING_HARNESS=<h>  Harness id (claude-code, codex, …)
-  VIBEDATING_HANDLE=<@id> Display handle
+  VIBEDATING_HANDLE=<@id> Display handle (one-off override; not persisted)
 `;
 
 async function main(argv: readonly string[]): Promise<number> {
@@ -503,6 +567,8 @@ async function main(argv: readonly string[]): Promise<number> {
       return 0;
     case 'connect':
       return cmdConnect();
+    case 'handle':
+      return cmdHandle(parsed.arg);
     case 'matches':
       return cmdMatches(parsed.live);
     case 'discover':
