@@ -13,7 +13,9 @@ import os from 'node:os';
 import path from 'node:path';
 import createTestnet from 'hyperdht/testnet.js';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { allLeagueNames, leaguesWithin } from './index.js';
 import {
+  leagueTopic,
   randomTopic,
   startDiscovery,
   type DiscoverySession,
@@ -24,6 +26,11 @@ import type { PeerLink } from './link.js';
 const ALICE: PeerHello = { handle: '@alice_10M', league: '10M', harness: 'claude-code' };
 const BOB: PeerHello = { handle: '@bob_10M', league: '10M', harness: 'codex' };
 
+// Cross-league fixtures for the adjacent-default / --any tests below.
+const ME_10M: PeerHello = { handle: '@me_10M', league: '10M', harness: 'claude-code' };
+const PEER_5M: PeerHello = { handle: '@peer_5M', league: '5M', harness: 'codex' };
+const PEER_1M: PeerHello = { handle: '@peer_1M', league: '1M', harness: 'codex' };
+
 async function waitFor(cond: () => boolean, timeoutMs: number): Promise<boolean> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
@@ -31,6 +38,12 @@ async function waitFor(cond: () => boolean, timeoutMs: number): Promise<boolean>
     await new Promise((r) => setTimeout(r, 100));
   }
   return cond();
+}
+
+function hasPeer(session: DiscoverySession, hello: PeerHello): boolean {
+  return [...session.peers.values()].some(
+    (p) => p.handle === hello.handle && p.league === hello.league,
+  );
 }
 
 describe('live session (in-process DHT, no public network)', () => {
@@ -107,4 +120,75 @@ describe('live session (in-process DHT, no public network)', () => {
     linkA!.close();
     expect(await waitFor(() => bClosed, 10_000)).toBe(true);
   }, 45_000);
+});
+
+describe('cross-league discovery (adjacent default + --any)', () => {
+  let testnet: Awaited<ReturnType<typeof createTestnet>>;
+  let dirs: string[];
+  let sessions: DiscoverySession[];
+
+  beforeEach(async () => {
+    testnet = await createTestnet(3);
+    dirs = [];
+    sessions = [];
+  }, 30_000);
+
+  afterEach(async () => {
+    for (const s of sessions) await s.close();
+    await testnet.destroy();
+    for (const d of dirs) rmSync(d, { recursive: true, force: true });
+  }, 30_000);
+
+  function tmpDir(): string {
+    const d = mkdtempSync(path.join(os.tmpdir(), 'vibedating-cross-'));
+    dirs.push(d);
+    return d;
+  }
+
+  /** Spawn a node joining `topics` with an `acceptLeague` gate (no live link). */
+  async function spawnMulti(
+    hello: PeerHello,
+    topics: Buffer[],
+    acceptLeague: (peerLeague: string) => boolean,
+  ): Promise<DiscoverySession> {
+    const session = await startDiscovery({
+      hello,
+      topics,
+      acceptLeague,
+      bootstrap: testnet.bootstrap,
+      stateDir: tmpDir(),
+    });
+    sessions.push(session);
+    return session;
+  }
+
+  it('adjacent leagues connect when both use ±1 topics (10M ↔ 5M)', async () => {
+    // 10M's ±1 = {5M,10M,100M}; 5M's ±1 = {1M,5M,10M}. Shared topics: 5M,10M.
+    const meNames = leaguesWithin('10M', 1);
+    const peerNames = leaguesWithin('5M', 1);
+    const a = await spawnMulti(ME_10M, meNames.map(leagueTopic), (l) => meNames.includes(l));
+    const b = await spawnMulti(PEER_5M, peerNames.map(leagueTopic), (l) => peerNames.includes(l));
+    await Promise.all([a.ready, b.ready]);
+    expect(await waitFor(() => hasPeer(a, PEER_5M) && hasPeer(b, ME_10M), 15_000)).toBe(true);
+  }, 45_000);
+
+  it('--any connects leagues far apart (10M ↔ 1M)', async () => {
+    const all = allLeagueNames();
+    const a = await spawnMulti(ME_10M, all.map(leagueTopic), () => true);
+    const b = await spawnMulti(PEER_1M, all.map(leagueTopic), () => true);
+    await Promise.all([a.ready, b.ready]);
+    expect(await waitFor(() => hasPeer(a, PEER_1M) && hasPeer(b, ME_10M), 15_000)).toBe(true);
+  }, 45_000);
+
+  it('exact-only (own league topic only) never connects adjacent leagues', async () => {
+    // The legacy default: each joins ONLY its own league topic → disjoint topics
+    // → a connection can never form (the DHT only pairs peers on a shared
+    // topic). acceptLeague is exact as a belt-and-braces guard. Deterministic.
+    const a = await spawnMulti(ME_10M, [leagueTopic('10M')], (l) => l === '10M');
+    const b = await spawnMulti(PEER_5M, [leagueTopic('5M')], (l) => l === '5M');
+    await Promise.all([a.ready, b.ready]);
+    await new Promise((r) => setTimeout(r, 2_000));
+    expect(a.peers.size).toBe(0);
+    expect(b.peers.size).toBe(0);
+  }, 30_000);
 });
