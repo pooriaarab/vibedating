@@ -36,11 +36,23 @@ import {
   type PeerHello,
 } from './p2p.js';
 import { loadOrCreateIdentity, signHelloClaims } from './identity.js';
+import { ensureHandle } from './handlegen.js';
+import { sanitizePeerText } from './untrusted.js';
+import {
+  daemonStatus,
+  installDaemonService,
+  removeDaemonState,
+  startDaemon,
+  stopDaemon,
+  uninstallDaemonService,
+  writeDaemonState,
+} from './daemon.js';
 import { createPairing } from './pairing.js';
 import {
   addBlock,
   canShareLive,
   connectProfile,
+  defaultStateDir,
   grantLiveConsent,
   isBlocked,
   loadBlocklist,
@@ -56,7 +68,7 @@ import { createLiveBridge, startServer, type LiveBridge } from './server.js';
 import { runMcp } from './mcp.js';
 
 /** Mirrors package.json version (kept here; package.json imports are brittle under bundling). */
-const VERSION = '0.4.1';
+const VERSION = '0.5.0';
 
 /** Recognized top-level commands, plus the synthetic help/version. */
 export type Command =
@@ -70,6 +82,7 @@ export type Command =
   | 'block'
   | 'unblock'
   | 'blocklist'
+  | 'daemon'
   | 'mcp'
   | 'help'
   | 'version'
@@ -89,6 +102,8 @@ export interface ParsedArgs {
   readonly arg: string | undefined;
   /** `live --to <@handle>`: targeted match — auto-open that specific peer. */
   readonly to: string | undefined;
+  /** `live --keep-alive`: stay in the swarm after stdin EOF. Default false. */
+  readonly keepAlive: boolean;
 }
 
 function parsePort(raw: string): number | undefined {
@@ -110,6 +125,7 @@ export function parseArgs(argv: readonly string[]): ParsedArgs {
     any: false,
     arg: undefined,
     to: undefined,
+    keepAlive: false,
   };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i]!;
@@ -122,6 +138,7 @@ export function parseArgs(argv: readonly string[]): ParsedArgs {
         any: false,
         arg: undefined,
         to: undefined,
+        keepAlive: false,
       };
     }
     if (a === '--help' || a === '-h') {
@@ -133,10 +150,15 @@ export function parseArgs(argv: readonly string[]): ParsedArgs {
         any: false,
         arg: undefined,
         to: undefined,
+        keepAlive: false,
       };
     }
     if (a === '--live') {
       out = { ...out, live: true };
+      continue;
+    }
+    if (a === '--keep-alive') {
+      out = { ...out, keepAlive: true };
       continue;
     }
     if (a === '--any') {
@@ -185,6 +207,7 @@ export function parseArgs(argv: readonly string[]): ParsedArgs {
       a === 'block' ||
       a === 'unblock' ||
       a === 'blocklist' ||
+      a === 'daemon' ||
       a === 'mcp' ||
       a === 'help'
         ? a
@@ -212,6 +235,22 @@ function formatTokens(n: number): string {
   if (abs >= 1e6) return `${trim(n / 1e6)}M`;
   if (abs >= 1e3) return `${trim(n / 1e3)}k`;
   return String(n);
+}
+
+/**
+ * Compact relative time for local lists: an ISO timestamp → "just now" /
+ * "5m ago" / "3h ago" / "2d ago". Unparseable input → "unknown". Pure.
+ */
+export function formatAgo(iso: string, now: Date = new Date()): string {
+  const t = Date.parse(iso);
+  if (Number.isNaN(t)) return 'unknown';
+  const s = Math.max(0, Math.floor((now.getTime() - t) / 1000));
+  if (s < 60) return 'just now';
+  const m = Math.floor(s / 60);
+  if (m < 60) return `${m}m ago`;
+  const h = Math.floor(m / 60);
+  if (h < 24) return `${h}h ago`;
+  return `${Math.floor(h / 24)}d ago`;
 }
 
 /**
@@ -314,7 +353,11 @@ const MARKS_LEGEND =
 
 async function cmdConnect(): Promise<number> {
   const harness: Harness = (process.env['VIBEDATING_HARNESS'] as Harness | undefined) ?? 'claude-code';
-  const handle = resolveHandle();
+  // Zero-friction: first connect mints + persists a memetic handle when none is
+  // set (env override still wins as a one-off) — never silently ship as @you.
+  const ensured = ensureHandle();
+  const handle = ensured.handle;
+  const firstConnect = loadProfile() === null;
   const snapshot = await readUsage(harness);
   const profile = connectProfile(snapshot, handle);
   // First connect generates the persistent ed25519 identity (mode 0600); later
@@ -324,10 +367,18 @@ async function cmdConnect(): Promise<number> {
   process.stdout.write('\n');
   process.stdout.write(`  ${leagueLabel(lg.name)}\n`);
   process.stdout.write(`  handle: ${profile.handle}  ·  harness: ${profile.harness}\n`);
+  if (ensured.generated) {
+    process.stdout.write(`  assigned handle: ${profile.handle} — change it with: vibedate handle @name\n`);
+  }
   process.stdout.write(`  verification: ${verificationText(snapshot)}\n`);
   process.stdout.write(`  identity: ed25519 ${identity.publicKeyHex.slice(0, 12)}… — signs your hello (🔑)\n`);
   process.stdout.write('\n');
-  process.stdout.write('  • raw usage stays local · only league shared\n\n');
+  process.stdout.write('  • raw usage stays local · only league shared\n');
+  if (firstConnect) {
+    // Onboarding (opt-in, reversible): offer the notify-on-login daemon once.
+    process.stdout.write('  • optional: get notified of new matches on login — `vibedate daemon install` (undo: daemon uninstall)\n');
+  }
+  process.stdout.write('\n');
   return 0;
 }
 
@@ -384,7 +435,9 @@ async function cmdMatches(live: boolean): Promise<number> {
     );
     process.stdout.write(`  ${MARKS_LEGEND}\n\n`);
     for (const p of livePeers) {
-      process.stdout.write(`  ${p.handle.padEnd(28)} ${p.league} · ${p.harness} ${usageMark(p)}${idMark(p)}\n`);
+      // lastMessageAt is local metadata (set when a msg arrived from them).
+      const lastMsg = p.lastMessageAt !== undefined ? ` · last msg ${formatAgo(p.lastMessageAt)}` : '';
+      process.stdout.write(`  ${p.handle.padEnd(28)} ${p.league} · ${p.harness} ${usageMark(p)}${idMark(p)}${lastMsg}\n`);
     }
     process.stdout.write('\n');
     return 0;
@@ -531,6 +584,17 @@ async function cmdOpen(port: number | undefined, any: boolean): Promise<number> 
 }
 
 /**
+ * Whether `live` should stay in the swarm after stdin closes. An explicit
+ * `--keep-alive` always keeps it; otherwise AUTO-detect: a non-TTY stdin
+ * (piped, `</dev/null`, backgrounded) hits EOF immediately, and exiting there
+ * would kill an unattended session — so it stays up until SIGINT/SIGTERM.
+ * Interactive TTY behavior is unchanged: Ctrl+D / EOF still exits.
+ */
+export function shouldKeepAlive(flag: boolean, stdinIsTTY: boolean | undefined): boolean {
+  return flag || stdinIsTTY !== true;
+}
+
+/**
  * `vibedating live [--dating]` — live text chat with same-league peers.
  *
  * Omegle by default (auto-pair; `/next` rolls a new peer). `--dating` advertises
@@ -540,7 +604,12 @@ async function cmdOpen(port: number | undefined, any: boolean): Promise<number> 
  * protocol + pairing policy are unit tested; this readline loop is manual-smoke
  * only.
  */
-async function cmdLive(dating: boolean, any: boolean, to: string | undefined): Promise<number> {
+async function cmdLive(
+  dating: boolean,
+  any: boolean,
+  to: string | undefined,
+  keepAlive: boolean,
+): Promise<number> {
   const profile = loadProfile();
   if (!profile) {
     process.stderr.write('Not connected yet. Run `vibedating connect` first.\n');
@@ -578,11 +647,14 @@ async function cmdLive(dating: boolean, any: boolean, to: string | undefined): P
       return;
     }
     const { qual } = peerDirection(profile.league, link.hello.league);
+    // AEGIS-lite: the handle is wire data — display-sanitized, never trusted.
     process.stdout.write(
-      `  · matched ${link.hello.handle} (${link.hello.league}${qual} · ${link.hello.harness}) ${usageMark(link.hello)}${idMark(link.hello)}\n`,
+      `  · matched ${sanitizePeerText(link.hello.handle)} (${link.hello.league}${qual} · ${link.hello.harness}) ${usageMark(link.hello)}${idMark(link.hello)}\n`,
     );
     link.onMessage((m) => {
-      process.stdout.write(`  <${link.hello.handle}> ${m.text}\n`);
+      // AEGIS-lite: chat text is UNTRUSTED display data — never executed, never
+      // passed to a shell/agent; control/bidi chars stripped before printing.
+      process.stdout.write(`  <${sanitizePeerText(link.hello.handle)}> ${sanitizePeerText(m.text)}\n`);
     });
   });
 
@@ -599,13 +671,13 @@ async function cmdLive(dating: boolean, any: boolean, to: string | undefined): P
       if (target !== null && !sameHandle(link.hello.handle, target)) {
         const { qual } = peerDirection(profile.league, link.hello.league);
         process.stdout.write(
-          `  + ${link.hello.handle} (${link.hello.league}${qual}) ${usageMark(link.hello)}${idMark(link.hello)} — not your target\n`,
+          `  + ${sanitizePeerText(link.hello.handle)} (${link.hello.league}${qual}) ${usageMark(link.hello)}${idMark(link.hello)} — not your target\n`,
         );
         link.close();
         return;
       }
       if (target !== null) {
-        process.stdout.write(`  ★ found ${link.hello.handle} — auto-opening\n`);
+        process.stdout.write(`  ★ found ${sanitizePeerText(link.hello.handle)} — auto-opening\n`);
       }
       pairing.add(link);
     },
@@ -625,9 +697,13 @@ async function cmdLive(dating: boolean, any: boolean, to: string | undefined): P
   process.once('SIGINT', stop);
   process.once('SIGTERM', stop);
 
+  let quitRequested = false;
   for await (const line of rl) {
     const text = line.trim();
-    if (text === '/quit') break;
+    if (text === '/quit') {
+      quitRequested = true;
+      break;
+    }
     if (text === '/next') {
       pairing.next();
       continue;
@@ -646,6 +722,18 @@ async function cmdLive(dating: boolean, any: boolean, to: string | undefined): P
     } else {
       process.stdout.write('  · no peer yet — waiting for a match…\n');
     }
+  }
+
+  // The readline loop ended via stdin EOF (not /quit). With --keep-alive — or
+  // automatically when stdin is not a TTY (piped/backgrounded, where EOF is
+  // immediate) — stay in the swarm instead of dying: an unattended session
+  // must keep matching until it is explicitly signaled.
+  if (!quitRequested && shouldKeepAlive(keepAlive, process.stdin.isTTY)) {
+    process.stdout.write('  stdin closed — staying in the swarm (Ctrl+C / SIGTERM to leave)\n');
+    await new Promise<void>((resolve) => {
+      process.once('SIGINT', () => resolve());
+      process.once('SIGTERM', () => resolve());
+    });
   }
 
   process.removeListener('SIGINT', stop);
@@ -797,18 +885,136 @@ async function cmdBlocklist(): Promise<number> {
   return 0;
 }
 
+/**
+ * `vibedate daemon run` — the actual daemon process (spawned detached by
+ * `daemon start`, or directly by the installed launchd/systemd service).
+ * NOTIFY-ONLY: joins discovery and fires a vibe-core notify() on each NEW
+ * match (inside startDiscovery) — it never passes onLink, so chat/video are
+ * never auto-opened. Needs NO stdin: runs until SIGTERM/SIGINT, so it works
+ * unattended/backgrounded (no EOF death).
+ */
+async function cmdDaemonRun(any: boolean): Promise<number> {
+  const profile = loadProfile();
+  if (!profile) {
+    process.stderr.write('Not connected yet. Run `vibedating connect` first.\n');
+    return 1;
+  }
+  // Consent-gated exactly like `live`/`open`: invoking the daemon IS the opt-in.
+  if (!canShareLive()) grantLiveConsent();
+  const dir = defaultStateDir();
+  writeDaemonState(dir, { pid: process.pid, startedAt: new Date().toISOString(), any, version: VERSION });
+
+  const hello = buildHello(profile);
+  const { topics, acceptLeague } = discoveryScope(profile.league, any);
+  const session = await startDiscovery({
+    hello,
+    topics,
+    acceptLeague,
+    isBlocked: blockedChecker(),
+    onPeer: (peer, isNew) => {
+      // AEGIS-lite: the handle is untrusted wire data — sanitized so a hostile
+      // peer can't forge log lines in daemon.log.
+      process.stdout.write(
+        `  [${new Date().toISOString()}] ${isNew ? 'NEW match' : 'peer seen'}: ${sanitizePeerText(peer.handle)} (${peer.league} · ${peer.harness})\n`,
+      );
+    },
+  });
+  process.stdout.write(
+    `  vibedating daemon running (pid ${process.pid}) — notify-only${any ? ' · --any' : ''}\n`,
+  );
+
+  await new Promise<void>((resolve) => {
+    process.once('SIGINT', () => resolve());
+    process.once('SIGTERM', () => resolve());
+  });
+  await session.close();
+  removeDaemonState(dir);
+  process.stdout.write('  daemon stopped\n');
+  return 0;
+}
+
+/**
+ * `vibedate daemon [start|stop|status]` — manage the notify-only background
+ * daemon. `run` is the internal foreground entry (used by start/launchd/systemd).
+ */
+async function cmdDaemon(arg: string | undefined, any: boolean): Promise<number> {
+  switch (arg) {
+    case 'start': {
+      if (loadProfile() === null) {
+        process.stderr.write('Not connected yet. Run `vibedating connect` first.\n');
+        return 1;
+      }
+      const r = startDaemon({ any, version: VERSION });
+      if (!r.started) {
+        process.stdout.write(`  ${r.reason}\n`);
+        return 0;
+      }
+      process.stdout.write(`  daemon started (pid ${r.pid}) — notify-only: alerts on NEW matches, never opens chat/video\n`);
+      process.stdout.write(`  logs: ~/.vibedating/daemon.log · stop: vibedate daemon stop\n`);
+      return 0;
+    }
+    case 'stop': {
+      const r = await stopDaemon();
+      process.stdout.write(
+        r.stopped ? `  daemon stopped (pid ${r.pid})\n` : `  ${r.reason}\n`,
+      );
+      return 0;
+    }
+    case 'status': {
+      const s = daemonStatus();
+      if (s.running && s.state !== null) {
+        process.stdout.write(
+          `  daemon running (pid ${s.state.pid}) since ${s.state.startedAt}${s.state.any ? ' · --any' : ''}\n`,
+        );
+      } else {
+        process.stdout.write('  daemon not running\n');
+      }
+      return 0;
+    }
+    case 'run':
+      return cmdDaemonRun(any);
+    case 'install': {
+      if (loadProfile() === null) {
+        process.stderr.write('Not connected yet. Run `vibedating connect` first.\n');
+        return 1;
+      }
+      const r = installDaemonService({ any });
+      process.stdout.write(`  ${r.detail}\n`);
+      if (r.servicePath !== null) process.stdout.write(`  service: ${r.servicePath}\n`);
+      if (r.installed) process.stdout.write('  undo anytime: vibedate daemon uninstall\n');
+      return r.installed ? 0 : 1;
+    }
+    case 'uninstall': {
+      const r = uninstallDaemonService({});
+      process.stdout.write(`  ${r.detail}\n`);
+      return 0;
+    }
+    default:
+      process.stderr.write('usage: vibedating daemon [start|stop|status|install|uninstall] [--any]\n');
+      return 1;
+  }
+}
+
 const HELP = `vibedating ${VERSION} — dating by tokens (local-first)
 
 Usage:
   vibedating connect            Read your usage, compute + print your league
   vibedating matches [--live]   List candidates in your league (live peers if any)
   vibedating discover [--live] [--any]  Find live peers over the DHT (your league + adjacent; --any = everyone)
-  vibedating live [--dating] [--any] [--to @handle]  Live chat (your league + adjacent; --any = everyone; /next or --dating pick; --to targets one peer)
+  vibedating live [--dating] [--any] [--to @handle] [--keep-alive]  Live chat (your league
+                                + adjacent; --any = everyone; /next or --dating pick;
+                                --to targets one peer; --keep-alive survives stdin EOF —
+                                automatic when stdin is not a TTY)
   vibedating find <@handle> [--any]  Search the DHT for one specific handle (★ highlights a match)
   vibedating handle [@name]     Print or set your handle (persisted; a leading '@' is optional)
   vibedating block <@handle>    Block a handle — their hello is dropped (never recorded/paired)
   vibedating unblock <@handle>  Remove a handle from the blocklist
   vibedating blocklist          List blocked handles
+  vibedating daemon [start|stop|status|install|uninstall] [--any]
+                                Manage the notify-only background daemon — alerts on
+                                NEW matches, never opens chat/video. install adds a
+                                login service (launchd on macOS, systemd on Linux);
+                                uninstall removes it.
   vibedating open [--port N] [--any]  Serve the local web app (default: random port)
                                 + live video + chat with connected peers
                                 (your league + adjacent; --any = every league)
@@ -856,6 +1062,8 @@ async function main(argv: readonly string[]): Promise<number> {
       return cmdUnblock(parsed.arg);
     case 'blocklist':
       return cmdBlocklist();
+    case 'daemon':
+      return cmdDaemon(parsed.arg, parsed.any);
     case 'matches':
       return cmdMatches(parsed.live);
     case 'discover':
@@ -863,7 +1071,7 @@ async function main(argv: readonly string[]): Promise<number> {
     case 'open':
       return cmdOpen(parsed.port, parsed.any);
     case 'live':
-      return cmdLive(parsed.dating, parsed.any, parsed.to);
+      return cmdLive(parsed.dating, parsed.any, parsed.to, parsed.keepAlive);
     case 'find':
       return cmdFind(parsed.arg, parsed.any);
     case 'mcp':
