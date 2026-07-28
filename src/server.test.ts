@@ -7,14 +7,18 @@ import { CANDIDATES } from './index.js';
 import type { RtcFrame } from './frame.js';
 import {
   createLiveBridge,
+  createRoomBridge,
   startServer,
   type LiveBridge,
   type LiveMessage,
   type LivePeerInfo,
+  type RoomBridge,
+  type RoomSignal,
   type StartedServer,
   type StartServerOptions,
 } from './server.js';
 import type { PeerLink } from './link.js';
+import type { RoomSession } from './room.js';
 
 // Hermetic state dir so the test never touches ~/.vibedating.
 const tmpDir = mkdtempSync(path.join(os.tmpdir(), 'vibedating-test-'));
@@ -556,5 +560,172 @@ describe('live text chat bridge (/live/message)', () => {
     // Backlog capped at 200 — the oldest 5 were dropped.
     expect(first?.text).toBe('m5');
     expect(await bridge.pollMessage('@ghost', 10)).toBeNull();
+  });
+});
+
+describe('room full-mesh signaling (/api/room, /room/signal)', () => {
+  /** Minimal RoomBridge fake that records sends and serves pre-queued signals. */
+  function fakeRoom(
+    name = 'den',
+    self = '@self',
+    members: readonly LivePeerInfo[] = [],
+  ): RoomBridge & {
+    sent: Array<{ handle: string; frame: RtcFrame }>;
+    queue: RoomSignal[];
+  } {
+    const sent: Array<{ handle: string; frame: RtcFrame }> = [];
+    const queue: RoomSignal[] = [];
+    return {
+      name,
+      self,
+      members,
+      attach() {
+        /* not exercised */
+      },
+      broadcast() {
+        /* not exercised */
+      },
+      async pollMessage() {
+        return null;
+      },
+      sendSignal(handle, frame) {
+        sent.push({ handle, frame });
+      },
+      async pollSignal(_handle) {
+        if (queue.length > 0) return queue.shift() ?? null;
+        return null;
+      },
+      sent,
+      queue,
+    };
+  }
+
+  it('GET /api/room returns null when no bridge is attached', async () => {
+    await withServer(async ({ url }) => {
+      const res = await fetch(`${url}/api/room`);
+      expect(res.status).toBe(200);
+      expect(await res.json()).toStrictEqual({ room: null, self: null, members: [] });
+    });
+  });
+
+  it('GET /api/room returns room/self/members when a bridge is attached', async () => {
+    const room = fakeRoom('den', '@alice', [
+      { handle: '@bob', league: '10M', harness: 'codex' },
+    ]);
+    await withServer(
+      async ({ url }) => {
+        const res = await fetch(`${url}/api/room`);
+        expect(res.status).toBe(200);
+        expect(await res.json()).toStrictEqual({
+          room: 'den',
+          self: '@alice',
+          members: [{ handle: '@bob', league: '10M', harness: 'codex' }],
+        });
+      },
+      { room },
+    );
+  });
+
+  it('GET /room/signal returns sender-tagged { from, rtc } frames', async () => {
+    const room = fakeRoom();
+    room.queue.push({ from: '@bob', rtc: { t: 'rtc-offer', sdp: 'v=0' } });
+    await withServer(
+      async ({ url }) => {
+        const res = await fetch(`${url}/room/signal?handle=${encodeURIComponent('@self')}`);
+        expect(res.status).toBe(200);
+        expect(await res.json()).toStrictEqual({
+          frame: { from: '@bob', rtc: { t: 'rtc-offer', sdp: 'v=0' } },
+        });
+        // Empty mailbox → null frame (no hang in tests).
+        const res2 = await fetch(`${url}/room/signal?handle=${encodeURIComponent('@self')}`);
+        expect(await res2.json()).toStrictEqual({ frame: null });
+      },
+      { room },
+    );
+  });
+
+  it('GET /room/signal 400s without handle; without bridge returns frame:null', async () => {
+    const room = fakeRoom();
+    await withServer(
+      async ({ url }) => {
+        const res = await fetch(`${url}/room/signal`);
+        expect(res.status).toBe(400);
+      },
+      { room },
+    );
+    await withServer(async ({ url }) => {
+      const res = await fetch(`${url}/room/signal?handle=${encodeURIComponent('@a')}`);
+      expect(res.status).toBe(200);
+      expect(await res.json()).toStrictEqual({ frame: null, reason: 'room-not-attached' });
+    });
+  });
+
+  it('POST /room/signal re-validates the rtc frame then relays by handle', async () => {
+    const room = fakeRoom();
+    await withServer(
+      async ({ url }) => {
+        const ok = await fetch(`${url}/room/signal`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({
+            handle: '@bob',
+            frame: { t: 'rtc-offer', sdp: 'v=0\r\no=- 1 1 IN IP4 0.0.0.0' },
+          }),
+        });
+        expect(ok.status).toBe(200);
+        expect(room.sent).toHaveLength(1);
+        expect(room.sent[0]?.handle).toBe('@bob');
+        expect(room.sent[0]?.frame.t).toBe('rtc-offer');
+
+        // Smuggled keys / non-rtc t are rejected before reaching the bridge.
+        const bad = await fetch(`${url}/room/signal`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ handle: '@bob', frame: { t: 'msg', id: 'x', text: 'nope', at: 1 } }),
+        });
+        expect(bad.status).toBe(400);
+        expect(room.sent).toHaveLength(1);
+      },
+      { room },
+    );
+  });
+
+  it('createRoomBridge tags onSignal with the sender and serves a merged mailbox', async () => {
+    const bridge = createRoomBridge('den');
+    let signalCb: ((from: string, frame: RtcFrame) => void) | undefined;
+    const sent: Array<{ handle: string; frame: RtcFrame }> = [];
+    const fakeSession = {
+      hello: { handle: '@self', league: '10M', harness: 'codex' },
+      members: new Map([
+        ['@bob', { handle: '@bob', league: '10M', harness: 'codex' }],
+        ['@cara', { handle: '@cara', league: '1B', harness: 'claude-code' }],
+      ]),
+      onMessage() {},
+      onSignal(cb: (from: string, frame: RtcFrame) => void) {
+        signalCb = cb;
+      },
+      sendSignal(handle: string, frame: RtcFrame) {
+        sent.push({ handle, frame });
+      },
+      broadcast() {
+        return [];
+      },
+    } as unknown as RoomSession;
+    bridge.attach(fakeSession);
+
+    expect(bridge.self).toBe('@self');
+    expect(bridge.members.map((m) => m.handle).sort()).toEqual(['@bob', '@cara']);
+
+    bridge.sendSignal('@bob', { t: 'rtc-offer', sdp: 'offer-sdp' });
+    expect(sent).toEqual([{ handle: '@bob', frame: { t: 'rtc-offer', sdp: 'offer-sdp' } }]);
+
+    // Two senders land in ONE merged mailbox, each tagged with `from`.
+    signalCb?.('@bob', { t: 'rtc-offer', sdp: 'from-bob' });
+    signalCb?.('@cara', { t: 'rtc-ice', candidate: 'cand' });
+    const first = await bridge.pollSignal('@self', 10);
+    expect(first).toStrictEqual({ from: '@bob', rtc: { t: 'rtc-offer', sdp: 'from-bob' } });
+    const second = await bridge.pollSignal('@self', 10);
+    expect(second).toStrictEqual({ from: '@cara', rtc: { t: 'rtc-ice', candidate: 'cand' } });
+    expect(await bridge.pollSignal('@self', 10)).toBeNull();
   });
 });
