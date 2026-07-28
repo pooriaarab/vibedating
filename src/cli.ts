@@ -36,6 +36,7 @@ import {
   type PeerHello,
 } from './p2p.js';
 import { loadOrCreateIdentity, signHelloClaims } from './identity.js';
+import { ensureHandle } from './handlegen.js';
 import { createPairing } from './pairing.js';
 import {
   addBlock,
@@ -314,7 +315,10 @@ const MARKS_LEGEND =
 
 async function cmdConnect(): Promise<number> {
   const harness: Harness = (process.env['VIBEDATING_HARNESS'] as Harness | undefined) ?? 'claude-code';
-  const handle = resolveHandle();
+  // Zero-friction: first connect mints + persists a memetic handle when none is
+  // set (env override still wins as a one-off) — never silently ship as @you.
+  const ensured = ensureHandle();
+  const handle = ensured.handle;
   const snapshot = await readUsage(harness);
   const profile = connectProfile(snapshot, handle);
   // First connect generates the persistent ed25519 identity (mode 0600); later
@@ -324,6 +328,9 @@ async function cmdConnect(): Promise<number> {
   process.stdout.write('\n');
   process.stdout.write(`  ${leagueLabel(lg.name)}\n`);
   process.stdout.write(`  handle: ${profile.handle}  ·  harness: ${profile.harness}\n`);
+  if (ensured.generated) {
+    process.stdout.write(`  assigned handle: ${profile.handle} — change it with: vibedate handle @name\n`);
+  }
   process.stdout.write(`  verification: ${verificationText(snapshot)}\n`);
   process.stdout.write(`  identity: ed25519 ${identity.publicKeyHex.slice(0, 12)}… — signs your hello (🔑)\n`);
   process.stdout.write('\n');
