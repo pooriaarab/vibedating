@@ -15,15 +15,32 @@
 import readline from 'node:readline';
 import { pathToFileURL } from 'node:url';
 import process from 'node:process';
-import { CANDIDATES, league, leagueIndex, matches, readUsage, type Harness } from './index.js';
-import { LIVE_NOTICE, loadPeers, startDiscovery, TOPIC_PREFIX, type DiscoverySession, type PeerHello } from './p2p.js';
+import {
+  allLeagueNames,
+  CANDIDATES,
+  league,
+  leagueIndex,
+  leaguesWithin,
+  matches,
+  readUsage,
+  type Harness,
+} from './index.js';
+import {
+  LIVE_NOTICE,
+  leagueTopic,
+  loadPeers,
+  startDiscovery,
+  TOPIC_PREFIX,
+  type DiscoverySession,
+  type PeerHello,
+} from './p2p.js';
 import { createPairing } from './pairing.js';
 import { canShareLive, connectProfile, grantLiveConsent, loadProfile } from './state.js';
 import { createLiveBridge, startServer, type LiveBridge } from './server.js';
 import { runMcp } from './mcp.js';
 
 /** Mirrors package.json version (kept here; package.json imports are brittle under bundling). */
-const VERSION = '0.2.1';
+const VERSION = '0.3.0';
 
 /** Recognized top-level commands, plus the synthetic help/version. */
 export type Command =
@@ -45,6 +62,8 @@ export interface ParsedArgs {
   readonly live: boolean;
   /** `live --dating`: pick-a-handle mode vs omegle auto-pair. Default false. */
   readonly dating: boolean;
+  /** `discover --any` / `live --any`: match every league (not just ±1). Default false. */
+  readonly any: boolean;
 }
 
 function parsePort(raw: string): number | undefined {
@@ -58,17 +77,21 @@ function parsePort(raw: string): number | undefined {
  * Pure: no IO, no process access — trivially unit-testable.
  */
 export function parseArgs(argv: readonly string[]): ParsedArgs {
-  let out: ParsedArgs = { command: null, port: undefined, live: false, dating: false };
+  let out: ParsedArgs = { command: null, port: undefined, live: false, dating: false, any: false };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i]!;
     if (a === '--version' || a === '-v') {
-      return { command: 'version', port: undefined, live: false, dating: false };
+      return { command: 'version', port: undefined, live: false, dating: false, any: false };
     }
     if (a === '--help' || a === '-h') {
-      return { command: 'help', port: undefined, live: false, dating: false };
+      return { command: 'help', port: undefined, live: false, dating: false, any: false };
     }
     if (a === '--live') {
       out = { ...out, live: true };
+      continue;
+    }
+    if (a === '--any') {
+      out = { ...out, any: true };
       continue;
     }
     if (a === '--dating') {
@@ -109,6 +132,48 @@ export function parseArgs(argv: readonly string[]): ParsedArgs {
 
 function leagueLabel(name: string): string {
   return name === 'below-1M' ? 'below 1M (not yet in a league)' : `${name} League`;
+}
+
+/**
+ * Build the DHT topics + league-accept predicate for a live session.
+ *
+ * Adjacent (default): join your league ±1 topics, accept peers within ±1 — so
+ * thin leagues and cross-league friends still connect. `--any`: join every
+ * league topic, accept everyone. Your own league topic is always placed first
+ * (the "primary" topic shown in the CLI + used for peers.json).
+ */
+function discoveryScope(
+  myLeague: string,
+  any: boolean,
+): { topics: Buffer[]; acceptLeague: (peerLeague: string) => boolean } {
+  const names = any ? allLeagueNames() : leaguesWithin(myLeague, 1);
+  // Own league first → primary topic is always yours (display + back-compat).
+  const ordered = [myLeague, ...names.filter((n) => n !== myLeague)];
+  if (any) {
+    return { topics: ordered.map(leagueTopic), acceptLeague: () => true };
+  }
+  const accepted = new Set(names);
+  return {
+    topics: ordered.map(leagueTopic),
+    acceptLeague: (peerLeague: string) => accepted.has(peerLeague),
+  };
+}
+
+/**
+ * Direction marker for a discovered peer relative to your league, so
+ * cross-league matches (thin pool / cross-league friends) are visible. Same
+ * league → `sameBullet` (default `+`); higher/lower league → an up/down arrow
+ * plus a ` · higher/lower league` qualifier.
+ */
+function peerDirection(
+  myLeague: string,
+  peerLeague: string,
+  sameBullet = '+',
+): { bullet: string; qual: string } {
+  const d = leagueIndex(peerLeague) - leagueIndex(myLeague);
+  if (d > 0) return { bullet: '↑', qual: ' · higher league' };
+  if (d < 0) return { bullet: '↓', qual: ' · lower league' };
+  return { bullet: sameBullet, qual: '' };
 }
 
 async function cmdConnect(): Promise<number> {
@@ -178,7 +243,7 @@ async function cmdMatches(live: boolean): Promise<number> {
   return 0;
 }
 
-async function cmdDiscover(live: boolean): Promise<number> {
+async function cmdDiscover(live: boolean, any: boolean): Promise<number> {
   const profile = loadProfile();
   if (!profile) {
     process.stderr.write('Not connected yet. Run `vibedating connect` first.\n');
@@ -203,18 +268,32 @@ async function cmdDiscover(live: boolean): Promise<number> {
   process.stdout.write('\n');
   process.stdout.write(`  ${LIVE_NOTICE}\n`);
 
+  const { topics, acceptLeague } = discoveryScope(profile.league, any);
   const session = await startDiscovery({
     hello,
+    topics,
+    acceptLeague,
     onPeer: (peer, isNew) => {
+      const { bullet, qual } = peerDirection(profile.league, peer.league);
       process.stdout.write(
-        `  + ${peer.handle} (${peer.league} · ${peer.harness})${isNew ? '  ← new match' : ''}\n`,
+        `  ${bullet} ${peer.handle} (${peer.league}${qual} · ${peer.harness})${isNew ? '  ← new match' : ''}\n`,
       );
     },
   });
   process.stdout.write(
-    `  topic: ${TOPIC_PREFIX}${profile.league} → ${session.topic.toString('hex').slice(0, 12)}…\n`,
+    `  topic: ${TOPIC_PREFIX}${profile.league} → ${session.topic.toString('hex').slice(0, 12)}…` +
+      `${topics.length > 1 ? ` (+${topics.length - 1} more)` : ''}\n`,
   );
-  process.stdout.write('  listening for same-league peers… (Ctrl+C to stop)\n\n');
+  if (!any && session.peers.size === 0) {
+    process.stdout.write(
+      '  no one in your league yet — also listening to adjacent leagues (use --any to match anyone)\n',
+    );
+  }
+  process.stdout.write(
+    any
+      ? '  listening for ANY league peers… (Ctrl+C to stop)\n\n'
+      : '  listening for same + adjacent-league peers… (Ctrl+C to stop)\n\n',
+  );
 
   // Run until interrupted; leave the swarm cleanly on the way out.
   await new Promise<void>((resolve) => {
@@ -288,7 +367,7 @@ async function cmdOpen(port: number | undefined): Promise<number> {
  * (the command IS the opt-in). The wire protocol + pairing policy are unit
  * tested; this readline loop is manual-smoke only.
  */
-async function cmdLive(dating: boolean): Promise<number> {
+async function cmdLive(dating: boolean, any: boolean): Promise<number> {
   const profile = loadProfile();
   if (!profile) {
     process.stderr.write('Not connected yet. Run `vibedating connect` first.\n');
@@ -320,20 +399,25 @@ async function cmdLive(dating: boolean): Promise<number> {
       process.stdout.write('  · idle — no peer right now\n');
       return;
     }
+    const { qual } = peerDirection(profile.league, link.hello.league);
     process.stdout.write(
-      `  · matched ${link.hello.handle} (${link.hello.league} · ${link.hello.harness})\n`,
+      `  · matched ${link.hello.handle} (${link.hello.league}${qual} · ${link.hello.harness})\n`,
     );
     link.onMessage((m) => {
       process.stdout.write(`  <${link.hello.handle}> ${m.text}\n`);
     });
   });
 
+  const { topics, acceptLeague } = discoveryScope(profile.league, any);
   const session = await startDiscovery({
     hello,
+    topics,
+    acceptLeague,
     onLink: (link) => pairing.add(link),
   });
   process.stdout.write(
-    `  topic: ${TOPIC_PREFIX}${profile.league} → ${session.topic.toString('hex').slice(0, 12)}…\n`,
+    `  topic: ${TOPIC_PREFIX}${profile.league} → ${session.topic.toString('hex').slice(0, 12)}…` +
+      `${topics.length > 1 ? ` (+${topics.length - 1} more)` : ''}\n`,
   );
   process.stdout.write('  type to chat · /next · /open <handle> · /quit\n');
   process.stdout.write('  video chat: live A/V runs in the web app — run `vibedating open`\n\n');
@@ -384,8 +468,8 @@ const HELP = `vibedating ${VERSION} — dating by tokens (local-first)
 Usage:
   vibedating connect            Read your usage, compute + print your league
   vibedating matches [--live]   List candidates in your league (live peers if any)
-  vibedating discover [--live]  Find live same-league peers over the DHT (opt-in)
-  vibedating live [--dating]    Live chat with same-league peers (omegle /next, or --dating pick)
+  vibedating discover [--live] [--any]  Find live peers over the DHT (your league + adjacent; --any = everyone)
+  vibedating live [--dating] [--any]    Live chat (your league + adjacent; --any = everyone; /next or --dating pick)
   vibedating open [--port N]    Serve the local web app (default: random port)
                                 + live A/V video with connected same-league peers
   vibedating mcp                Run the stdio MCP server (profile, matches)
@@ -396,6 +480,10 @@ Privacy:
   Raw token usage is read and stored LOCALLY (~/.vibedating). Only the league
   bucket is ever shared. Live discovery (off by default) shares ONLY your
   handle + league + harness with same-league peers — opt in with --live.
+
+Matching:
+  discover/live match your league + adjacent (±1) tiers by default, so thin
+  leagues and cross-league friends still connect. --any matches every league.
 
 Env:
   VIBEDATING_TOKENS=<n>   Self-report a token count (e.g. 23400000 or 12M)
@@ -418,11 +506,11 @@ async function main(argv: readonly string[]): Promise<number> {
     case 'matches':
       return cmdMatches(parsed.live);
     case 'discover':
-      return cmdDiscover(parsed.live);
+      return cmdDiscover(parsed.live, parsed.any);
     case 'open':
       return cmdOpen(parsed.port);
     case 'live':
-      return cmdLive(parsed.dating);
+      return cmdLive(parsed.dating, parsed.any);
     case 'mcp':
       await runMcp();
       return 0;

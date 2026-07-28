@@ -23,8 +23,8 @@ describe('parseArgs — --live opt-in flag', () => {
   });
 
   it('sets live on discover and matches', () => {
-    expect(parseArgs(['discover', '--live'])).toEqual({ command: 'discover', port: undefined, live: true, dating: false });
-    expect(parseArgs(['--live', 'matches'])).toEqual({ command: 'matches', port: undefined, live: true, dating: false });
+    expect(parseArgs(['discover', '--live'])).toEqual({ command: 'discover', port: undefined, live: true, dating: false, any: false });
+    expect(parseArgs(['--live', 'matches'])).toEqual({ command: 'matches', port: undefined, live: true, dating: false, any: false });
   });
 
   it('combines with --port', () => {
@@ -33,6 +33,7 @@ describe('parseArgs — --live opt-in flag', () => {
       port: 8080,
       live: true,
       dating: false,
+      any: false,
     });
   });
 });
@@ -55,21 +56,21 @@ describe('parseArgs — version / help flags', () => {
 
 describe('parseArgs — open --port', () => {
   it('accepts --port <n>', () => {
-    expect(parseArgs(['open', '--port', '8080'])).toEqual({ command: 'open', port: 8080, live: false, dating: false });
+    expect(parseArgs(['open', '--port', '8080'])).toEqual({ command: 'open', port: 8080, live: false, dating: false, any: false });
   });
 
   it('accepts --port=<n>', () => {
-    expect(parseArgs(['open', '--port=8080'])).toEqual({ command: 'open', port: 8080, live: false, dating: false });
+    expect(parseArgs(['open', '--port=8080'])).toEqual({ command: 'open', port: 8080, live: false, dating: false, any: false });
   });
 
   it('rejects out-of-range / non-numeric ports (undefined, command intact)', () => {
-    expect(parseArgs(['open', '--port', 'nope'])).toEqual({ command: 'open', port: undefined, live: false, dating: false });
+    expect(parseArgs(['open', '--port', 'nope'])).toEqual({ command: 'open', port: undefined, live: false, dating: false, any: false });
     expect(parseArgs(['open', '--port', '0']).port).toBeUndefined();
     expect(parseArgs(['open', '--port', '70000']).port).toBeUndefined();
   });
 
   it('ignores --port with no following value', () => {
-    expect(parseArgs(['open', '--port'])).toEqual({ command: 'open', port: undefined, live: false, dating: false });
+    expect(parseArgs(['open', '--port'])).toEqual({ command: 'open', port: undefined, live: false, dating: false, any: false });
   });
 });
 
@@ -99,6 +100,7 @@ describe('parseArgs — live --dating', () => {
       port: undefined,
       live: false,
       dating: true,
+      any: false,
     });
   });
 
@@ -108,6 +110,49 @@ describe('parseArgs — live --dating', () => {
       port: undefined,
       live: true,
       dating: true,
+      any: false,
+    });
+  });
+});
+
+describe('parseArgs — --any flag', () => {
+  it('defaults to false', () => {
+    expect(parseArgs(['discover']).any).toBe(false);
+    expect(parseArgs(['live']).any).toBe(false);
+    expect(parseArgs(['live', '--dating']).any).toBe(false);
+  });
+
+  it('sets any on discover and live', () => {
+    expect(parseArgs(['discover', '--any'])).toEqual({
+      command: 'discover',
+      port: undefined,
+      live: false,
+      dating: false,
+      any: true,
+    });
+    expect(parseArgs(['live', '--any'])).toEqual({
+      command: 'live',
+      port: undefined,
+      live: false,
+      dating: false,
+      any: true,
+    });
+  });
+
+  it('combines --any with --live and --dating (all flags independent)', () => {
+    expect(parseArgs(['discover', '--live', '--any'])).toEqual({
+      command: 'discover',
+      port: undefined,
+      live: true,
+      dating: false,
+      any: true,
+    });
+    expect(parseArgs(['live', '--dating', '--any'])).toEqual({
+      command: 'live',
+      port: undefined,
+      live: false,
+      dating: true,
+      any: true,
     });
   });
 });
