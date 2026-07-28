@@ -3,14 +3,20 @@ import os from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
+  DAEMON_SERVICE_LABEL,
   daemonLogPath,
+  daemonServicePath,
   daemonStatePath,
   daemonStatus,
+  installDaemonService,
   isPidAlive,
   readDaemonState,
   removeDaemonState,
+  renderLaunchdPlist,
+  renderSystemdUnit,
   startDaemon,
   stopDaemon,
+  uninstallDaemonService,
   writeDaemonState,
   type DaemonState,
 } from './daemon.js';
@@ -197,5 +203,152 @@ describe('stopDaemon()', () => {
     expect(r).toEqual({ stopped: true, pid: 4242 });
     expect(signals).toEqual(['SIGTERM']);
     expect(readDaemonState(dir)).toBeNull();
+  });
+});
+
+describe('login-service install (launchd / systemd)', () => {
+  const exists = (p: string): boolean => {
+    try {
+      readFileSync(p, 'utf8');
+      return true;
+    } catch {
+      return false;
+    }
+  };
+
+  it('daemonServicePath picks the per-platform location (null when unsupported)', () => {
+    expect(daemonServicePath('darwin', '/home/u')).toBe(
+      `/home/u/Library/LaunchAgents/${DAEMON_SERVICE_LABEL}.plist`,
+    );
+    expect(daemonServicePath('linux', '/home/u')).toBe(
+      '/home/u/.config/systemd/user/vibedating.service',
+    );
+    expect(daemonServicePath('win32', 'C:\\u')).toBeNull();
+  });
+
+  it('renderLaunchdPlist runs `daemon run` at login, logging to the daemon log', () => {
+    const plist = renderLaunchdPlist({
+      execPath: '/usr/local/bin/node',
+      scriptPath: '/usr/local/lib/vibedate/dist/cli.js',
+      any: true,
+      logPath: '/home/u/.vibedating/daemon.log',
+    });
+    expect(plist).toContain(`<string>${DAEMON_SERVICE_LABEL}</string>`);
+    expect(plist).toContain('<string>/usr/local/bin/node</string>');
+    expect(plist).toContain('<string>daemon</string>');
+    expect(plist).toContain('<string>run</string>');
+    expect(plist).toContain('<string>--any</string>');
+    expect(plist).toContain('<key>RunAtLoad</key>');
+    expect(plist).toContain('/home/u/.vibedating/daemon.log');
+  });
+
+  it('renderLaunchdPlist omits --any in the adjacent-league scope', () => {
+    const plist = renderLaunchdPlist({
+      execPath: '/node',
+      scriptPath: '/cli.js',
+      any: false,
+      logPath: '/log',
+    });
+    expect(plist).not.toContain('--any');
+  });
+
+  it('renderSystemdUnit starts on login (default.target) and restarts on failure', () => {
+    const unit = renderSystemdUnit({ execPath: '/node', scriptPath: '/cli.js', any: false });
+    expect(unit).toContain('ExecStart=/node /cli.js daemon run');
+    expect(unit).not.toContain('--any');
+    expect(unit).toContain('WantedBy=default.target');
+    const unitAny = renderSystemdUnit({ execPath: '/node', scriptPath: '/cli.js', any: true });
+    expect(unitAny).toContain('ExecStart=/node /cli.js daemon run --any');
+  });
+
+  it('install on darwin writes the plist and bootstraps it (best-effort bootout first)', () => {
+    const calls: string[] = [];
+    const r = installDaemonService({
+      any: false,
+      dir,
+      platform: 'darwin',
+      homeDir: dir,
+      execPath: '/node',
+      scriptPath: '/cli.js',
+      run: (cmd, args) => {
+        calls.push(`${cmd} ${args.join(' ')}`);
+        return true;
+      },
+    });
+    expect(r.installed).toBe(true);
+    expect(r.servicePath).toBe(`${dir}/Library/LaunchAgents/${DAEMON_SERVICE_LABEL}.plist`);
+    expect(exists(r.servicePath!)).toBe(true);
+    expect(calls.some((c) => c.startsWith('launchctl bootout '))).toBe(true);
+    expect(calls.some((c) => c.startsWith('launchctl bootstrap '))).toBe(true);
+  });
+
+  it('install on linux writes the unit and enables it', () => {
+    const calls: string[] = [];
+    const r = installDaemonService({
+      any: true,
+      dir,
+      platform: 'linux',
+      homeDir: dir,
+      execPath: '/node',
+      scriptPath: '/cli.js',
+      run: (cmd, args) => {
+        calls.push(`${cmd} ${args.join(' ')}`);
+        return true;
+      },
+    });
+    expect(r.installed).toBe(true);
+    expect(exists(r.servicePath!)).toBe(true);
+    expect(calls).toContain('systemctl --user enable --now vibedating.service');
+  });
+
+  it('a failed bootstrap reports not-installed (unit file kept for debugging)', () => {
+    const r = installDaemonService({
+      any: false,
+      dir,
+      platform: 'darwin',
+      homeDir: dir,
+      execPath: '/node',
+      scriptPath: '/cli.js',
+      run: (cmd) => cmd !== 'launchctl' || false,
+    });
+    expect(r.installed).toBe(false);
+    expect(r.detail).toMatch(/bootstrap failed/);
+    expect(exists(r.servicePath!)).toBe(true);
+  });
+
+  it('unsupported platform installs nothing and points at daemon start', () => {
+    const r = installDaemonService({ any: false, dir, platform: 'win32', homeDir: dir });
+    expect(r.installed).toBe(false);
+    expect(r.servicePath).toBeNull();
+    expect(r.detail).toMatch(/daemon start/);
+  });
+
+  it('uninstall removes the service (idempotent, reversible)', () => {
+    const calls: string[] = [];
+    const install = installDaemonService({
+      any: false,
+      dir,
+      platform: 'linux',
+      homeDir: dir,
+      execPath: '/node',
+      scriptPath: '/cli.js',
+      run: () => true,
+    });
+    expect(exists(install.servicePath!)).toBe(true);
+    const r = uninstallDaemonService({
+      dir,
+      platform: 'linux',
+      homeDir: dir,
+      run: (cmd, args) => {
+        calls.push(`${cmd} ${args.join(' ')}`);
+        return true;
+      },
+    });
+    expect(r.detail).toMatch(/removed/);
+    expect(calls).toContain('systemctl --user disable --now vibedating.service');
+    expect(exists(install.servicePath!)).toBe(false);
+    // Second uninstall is still a clean no-op.
+    const again = uninstallDaemonService({ dir, platform: 'linux', homeDir: dir, run: () => true });
+    expect(again.detail).toMatch(/removed/);
   });
 });

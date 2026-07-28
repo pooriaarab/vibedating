@@ -12,8 +12,9 @@
  * reports liveness and reaps a stale pidfile. Process control is injectable
  * so the lifecycle is unit-testable without real children.
  */
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { mkdirSync, openSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { defaultStateDir } from './state.js';
 
@@ -185,4 +186,176 @@ export async function stopDaemon(opts: StopDaemonOptions = {}): Promise<StopDaem
   }
   removeDaemonState(dir);
   return { stopped: true, pid: state.pid };
+}
+
+/* -------------------------------------------------------------------------- */
+/* Login-service install (launchd on macOS, systemd --user on Linux)          */
+/* -------------------------------------------------------------------------- */
+
+/** launchd label / systemd unit name for the login service. */
+export const DAEMON_SERVICE_LABEL = 'ai.vibedating.daemon';
+const SYSTEMD_UNIT_NAME = 'vibedating.service';
+
+/**
+ * Where the login-service definition lives for this platform, or `null` when
+ * the platform has no supported user-service mechanism.
+ */
+export function daemonServicePath(
+  platform: NodeJS.Platform = process.platform,
+  homeDir: string = os.homedir(),
+): string | null {
+  if (platform === 'darwin') {
+    return path.join(homeDir, 'Library', 'LaunchAgents', `${DAEMON_SERVICE_LABEL}.plist`);
+  }
+  if (platform === 'linux') {
+    return path.join(homeDir, '.config', 'systemd', 'user', SYSTEMD_UNIT_NAME);
+  }
+  return null;
+}
+
+/** The argv the service runs: `node <cli> daemon run [--any]`. */
+function serviceArgv(execPath: string, scriptPath: string, any: boolean): readonly string[] {
+  return [execPath, scriptPath, 'daemon', 'run', ...(any ? ['--any'] : [])];
+}
+
+/** Render the launchd plist (RunAtLoad on login; output → the daemon log). Pure. */
+export function renderLaunchdPlist(opts: {
+  execPath: string;
+  scriptPath: string;
+  any: boolean;
+  logPath: string;
+}): string {
+  const args = serviceArgv(opts.execPath, opts.scriptPath, opts.any)
+    .map((a) => `    <string>${a}</string>`)
+    .join('\n');
+  return `<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>${DAEMON_SERVICE_LABEL}</string>
+  <key>ProgramArguments</key>
+  <array>
+${args}
+  </array>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <false/>
+  <key>StandardOutPath</key>
+  <string>${opts.logPath}</string>
+  <key>StandardErrorPath</key>
+  <string>${opts.logPath}</string>
+</dict>
+</plist>
+`;
+}
+
+/** Render the systemd --user unit (WantedBy=default.target → starts on login). Pure. */
+export function renderSystemdUnit(opts: {
+  execPath: string;
+  scriptPath: string;
+  any: boolean;
+}): string {
+  const execStart = serviceArgv(opts.execPath, opts.scriptPath, opts.any).join(' ');
+  return `[Unit]
+Description=vibedating notify-only daemon (alerts on new matches; never opens chat/video)
+
+[Service]
+ExecStart=${execStart}
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=default.target
+`;
+}
+
+/** Shell-out runner for launchctl/systemctl (injectable for tests). Returns success. */
+export type RunFn = (cmd: string, args: readonly string[]) => boolean;
+
+const defaultRun: RunFn = (cmd, args) => spawnSync(cmd, args, { stdio: 'inherit' }).status === 0;
+
+export interface ServiceInstallResult {
+  readonly installed: boolean;
+  readonly servicePath: string | null;
+  readonly detail: string;
+}
+
+export interface ServiceOptions {
+  readonly any: boolean;
+  readonly dir?: string;
+  readonly platform?: NodeJS.Platform;
+  readonly homeDir?: string;
+  readonly execPath?: string;
+  readonly scriptPath?: string;
+  readonly run?: RunFn;
+}
+
+/**
+ * Install the daemon as a login service (opt-in onboarding): launchd agent on
+ * macOS, systemd --user unit on Linux. Reversible via {@link uninstallDaemonService}.
+ */
+export function installDaemonService(opts: ServiceOptions): ServiceInstallResult {
+  const platform = opts.platform ?? process.platform;
+  const homeDir = opts.homeDir ?? os.homedir();
+  const run = opts.run ?? defaultRun;
+  const servicePath = daemonServicePath(platform, homeDir);
+  if (servicePath === null) {
+    return {
+      installed: false,
+      servicePath: null,
+      detail: `unsupported platform (${platform}) — run \`vibedate daemon start\` manually instead`,
+    };
+  }
+  const execPath = opts.execPath ?? process.execPath;
+  const scriptPath = opts.scriptPath ?? process.argv[1];
+  if (scriptPath === undefined) {
+    return { installed: false, servicePath, detail: 'cannot locate the CLI entry point' };
+  }
+  mkdirSync(path.dirname(servicePath), { recursive: true });
+  if (platform === 'darwin') {
+    const logPath = daemonLogPath(opts.dir ?? defaultStateDir());
+    writeFileSync(servicePath, renderLaunchdPlist({ execPath, scriptPath, any: opts.any, logPath }), 'utf8');
+    const uid = process.getuid?.() ?? 501;
+    run('launchctl', ['bootout', `gui/${uid}`, servicePath]); // best-effort (may not exist)
+    if (!run('launchctl', ['bootstrap', `gui/${uid}`, servicePath])) {
+      return { installed: false, servicePath, detail: 'launchctl bootstrap failed — service written but not loaded' };
+    }
+    return { installed: true, servicePath, detail: 'launchd agent installed — the daemon starts on login' };
+  }
+  writeFileSync(servicePath, renderSystemdUnit({ execPath, scriptPath, any: opts.any }), 'utf8');
+  run('systemctl', ['--user', 'daemon-reload']); // best-effort
+  if (!run('systemctl', ['--user', 'enable', '--now', SYSTEMD_UNIT_NAME])) {
+    return { installed: false, servicePath, detail: 'systemctl enable failed — unit written but not started' };
+  }
+  return { installed: true, servicePath, detail: 'systemd --user service installed — the daemon starts on login' };
+}
+
+/** Remove the login service installed by {@link installDaemonService}. Idempotent. */
+export function uninstallDaemonService(opts: Omit<ServiceOptions, 'any'>): ServiceInstallResult {
+  const platform = opts.platform ?? process.platform;
+  const homeDir = opts.homeDir ?? os.homedir();
+  const run = opts.run ?? defaultRun;
+  const servicePath = daemonServicePath(platform, homeDir);
+  if (servicePath === null) {
+    return {
+      installed: false,
+      servicePath: null,
+      detail: `unsupported platform (${platform})`,
+    };
+  }
+  if (platform === 'darwin') {
+    const uid = process.getuid?.() ?? 501;
+    run('launchctl', ['bootout', `gui/${uid}`, servicePath]); // best-effort
+  } else {
+    run('systemctl', ['--user', 'disable', '--now', SYSTEMD_UNIT_NAME]); // best-effort
+    run('systemctl', ['--user', 'daemon-reload']); // best-effort
+  }
+  try {
+    rmSync(servicePath, { force: true });
+  } catch {
+    /* already gone */
+  }
+  return { installed: false, servicePath, detail: 'login service removed — the daemon no longer starts on login' };
 }
