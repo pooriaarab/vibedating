@@ -19,6 +19,7 @@ import {
   type PeerHello,
 } from './p2p.js';
 import { serializeFrame } from './frame.js';
+import { loadOrCreateIdentity, signHelloClaims } from './identity.js';
 import { sameHandle } from './state.js';
 
 const ALICE: PeerHello = { handle: '@alice_10M', league: '10M', harness: 'claude-code' };
@@ -250,6 +251,110 @@ describe('live P2P discovery (in-process DHT, no public network)', () => {
     } finally {
       clearInterval(retry);
       await bobRaw.destroy();
+    }
+  }, 30_000);
+
+  it('two signed peers mark each other identity-verified and persist the pubkey', async () => {
+    // Both sides sign their hello with a persistent ed25519 identity (generated
+    // into their own state dirs, exactly like the CLI does). Each must end up
+    // with the other's pubkey retained + identityVerified — and NO nonce/sig.
+    const topic = randomTopic();
+    const dirA = tmpDir();
+    const dirB = tmpDir();
+    const idA = loadOrCreateIdentity(dirA);
+    const idB = loadOrCreateIdentity(dirB);
+    const claimsA = { handle: '@alice_10M', league: '10M', harness: 'claude-code', verified: true };
+    const claimsB = { handle: '@bob_10M', league: '10M', harness: 'codex', verified: false };
+    const helloA: PeerHello = { ...claimsA, ...signHelloClaims(idA, claimsA) };
+    const helloB: PeerHello = { ...claimsB, ...signHelloClaims(idB, claimsB) };
+
+    const a = await startDiscovery({ hello: helloA, topic, bootstrap: testnet.bootstrap, stateDir: dirA });
+    sessions.push(a);
+    const b = await startDiscovery({ hello: helloB, topic, bootstrap: testnet.bootstrap, stateDir: dirB });
+    sessions.push(b);
+    await Promise.all([a.ready, b.ready]);
+
+    const found = await waitFor(() => hasPeer(a, helloB) && hasPeer(b, helloA), 15_000);
+    expect(found).toBe(true);
+
+    const peerB = [...a.peers.values()].find((p) => p.handle === helloB.handle)!;
+    expect(peerB.identityVerified).toBe(true);
+    expect(peerB.pubkey).toBe(idB.publicKeyHex);
+    expect(peerB.verified).toBe(false); // the signed verified flag travels as-is
+    expect(peerB).not.toHaveProperty('sig');
+    expect(peerB).not.toHaveProperty('nonce');
+
+    const peerA = [...b.peers.values()].find((p) => p.handle === helloA.handle)!;
+    expect(peerA.identityVerified).toBe(true);
+    expect(peerA.pubkey).toBe(idA.publicKeyHex);
+    expect(peerA.verified).toBe(true);
+
+    // Persisted to peers.json too (pubkey + identityVerified, still no proof material).
+    const storedB = loadPeers(dirA).find((p) => p.handle === helloB.handle)!;
+    expect(storedB.pubkey).toBe(idB.publicKeyHex);
+    expect(storedB.identityVerified).toBe(true);
+    expect(storedB).not.toHaveProperty('sig');
+  }, 30_000);
+
+  it('drops a peer whose hello signature does not verify (impersonation attempt)', async () => {
+    // A raw impostor pushes a well-formed but INVALID proof: 64-hex pubkey +
+    // 128-hex sig that was never signed by that key. Connection + one-way
+    // handshake happen, but ALICE must drop the peer entirely.
+    const topic = randomTopic();
+    const aliceDir = tmpDir();
+    let onPeerFired = false;
+    const alice = await startDiscovery({
+      hello: ALICE,
+      topic,
+      bootstrap: testnet.bootstrap,
+      stateDir: aliceDir,
+      onPeer: () => {
+        onPeerFired = true;
+      },
+    });
+    sessions.push(alice);
+
+    const { default: Hyperswarm } = await import('hyperswarm');
+    const mallory = new Hyperswarm({ bootstrap: testnet.bootstrap });
+    await mallory.dht.fullyBootstrapped();
+    let aliceHelloSeen = '';
+    mallory.on('connection', (socket) => {
+      socket.write(
+        serializeFrame({
+          t: 'hello',
+          handle: '@mallory_10M',
+          league: '10M',
+          harness: 'codex',
+          verified: true,
+          pubkey: 'ab'.repeat(32), // well-formed 64-hex
+          nonce: 'cd'.repeat(16),
+          sig: 'ef'.repeat(64), // well-formed 128-hex, never signed by that key
+        }) + '\n',
+      );
+      socket.on('data', (chunk: Buffer) => {
+        aliceHelloSeen += chunk.toString('utf8');
+      });
+      socket.on('error', () => {});
+    });
+    const discovery = mallory.join(topic, { server: true, client: true });
+    // Bare swarms refresh slowly and first rounds can miss — retry eagerly
+    // (same pattern as the other impostor tests above).
+    const retry = setInterval(() => {
+      void discovery.refresh({ server: true, client: true }).catch(() => {});
+    }, 1000);
+
+    try {
+      const connected = await waitFor(() => aliceHelloSeen.includes('@alice_10M'), 20_000);
+      expect(connected).toBe(true);
+      // …but the signature doesn't verify → dropped: never retained, never
+      // surfaced to onPeer, never persisted.
+      await new Promise((r) => setTimeout(r, 1000)); // let any (non-)processing settle
+      expect([...alice.peers.values()]).toEqual([]);
+      expect(onPeerFired).toBe(false);
+      expect(loadPeers(aliceDir)).toEqual([]);
+    } finally {
+      clearInterval(retry);
+      await mallory.destroy();
     }
   }, 30_000);
 });

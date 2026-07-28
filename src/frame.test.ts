@@ -56,6 +56,49 @@ describe('frame protocol — hello verified flag', () => {
   });
 });
 
+describe('frame protocol — hello identity proof', () => {
+  const pubkey = 'a'.repeat(64);
+  const nonce = 'b'.repeat(32);
+  const sig = 'c'.repeat(128);
+  const base = { t: 'hello', handle: '@a', league: '10M', harness: 'codex' } as const;
+
+  it('round-trips a hello carrying pubkey + nonce + sig', () => {
+    const f: Frame = { ...base, verified: true, pubkey, nonce, sig };
+    expect(parseFrame(serializeFrame(f))).toEqual(f);
+  });
+
+  it('legacy hello carries no identity keys (backward compat)', () => {
+    const parsed = parseFrame(JSON.stringify(base));
+    expect(parsed).toEqual({ ...base });
+    expect(parsed).not.toHaveProperty('pubkey');
+    expect(parsed).not.toHaveProperty('sig');
+    expect(parsed).not.toHaveProperty('nonce');
+  });
+
+  it('rejects a malformed pubkey (not exactly 64 hex)', () => {
+    expect(parseFrame(JSON.stringify({ ...base, pubkey: 'a'.repeat(63) }))).toBeNull();
+    expect(parseFrame(JSON.stringify({ ...base, pubkey: 'a'.repeat(65) }))).toBeNull();
+    expect(parseFrame(JSON.stringify({ ...base, pubkey: 'z'.repeat(64) }))).toBeNull();
+    expect(parseFrame(JSON.stringify({ ...base, pubkey: 42 }))).toBeNull();
+  });
+
+  it('rejects a malformed sig (not exactly 128 hex)', () => {
+    expect(parseFrame(JSON.stringify({ ...base, sig: 'c'.repeat(127) }))).toBeNull();
+    expect(parseFrame(JSON.stringify({ ...base, sig: 'c'.repeat(129) }))).toBeNull();
+    expect(parseFrame(JSON.stringify({ ...base, sig: 'x'.repeat(128) }))).toBeNull();
+  });
+
+  it('rejects an oversized / non-hex nonce', () => {
+    expect(parseFrame(JSON.stringify({ ...base, nonce: 'b'.repeat(65) }))).toBeNull();
+    expect(parseFrame(JSON.stringify({ ...base, nonce: 'zz' }))).toBeNull();
+  });
+
+  it('admits uppercase hex (case-insensitive, length still exact)', () => {
+    const f: Frame = { ...base, pubkey: 'A'.repeat(64), nonce: 'B'.repeat(32), sig: 'C'.repeat(128) };
+    expect(parseFrame(serializeFrame(f))).toEqual(f);
+  });
+});
+
 describe('frame protocol — media frames', () => {
   it('round-trips a media-start frame', () => {
     const f: Frame = { t: 'media-start', id: 'm1', mime: 'image/png', size: 1234, name: 'cat.png' };

@@ -21,9 +21,10 @@ export const CONSENT_SCOPE = 'share:league';
 
 /**
  * Consent scope covering live P2P discovery: joining the public DHT on your
- * league topic and exchanging { handle, league, harness } with same-league
- * peers. Raw usage is never in scope. Opt-in only (default OFF) — granted by
- * `vibedating discover --live`, never implicitly.
+ * league topic and exchanging { handle, league, harness, verified flag,
+ * identity pubkey } with same-league peers. Raw usage is never in scope.
+ * Opt-in only (default OFF) — granted by `vibedating discover --live`, never
+ * implicitly.
  */
 export const LIVE_CONSENT_SCOPE = 'share:live';
 
@@ -118,7 +119,7 @@ export function canShareLeague(dir: string = defaultStateDir()): boolean {
 export function grantLiveConsent(dir: string = defaultStateDir()): void {
   createLedger(dir).grant(
     LIVE_CONSENT_SCOPE,
-    'discover --live: share handle+league+harness (never raw usage) with same-league peers on the public DHT',
+    'discover --live: share handle+league+harness+verified flag+identity pubkey (never raw usage) with same-league peers on the public DHT',
   );
 }
 

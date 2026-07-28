@@ -7,9 +7,11 @@
  * connection encryption come from hyperswarm/hyperdht).
  *
  * Handshake: on each encrypted peer connection both sides immediately send a
- * single JSON line with ONLY { handle, league, harness }. Raw token usage is
- * never sent, and the parser builds its result from an allowlist of keys, so
- * anything a peer adds beyond those three fields is dropped on receipt.
+ * single JSON line with ONLY the allowlisted fields { handle, league, harness,
+ * verified, pubkey, nonce, sig }. Raw token usage is never sent, and the parser
+ * builds its result from an allowlist of keys, so anything a peer adds beyond
+ * those fields is dropped on receipt. pubkey/sig bind the hello to a persistent
+ * ed25519 identity (see identity.ts): an invalid signature drops the peer.
  *
  * Consent: this module never decides policy — callers (the CLI) gate
  * {@link startDiscovery} behind the `share:live` consent grant (see state.ts).
@@ -21,6 +23,7 @@ import path from 'node:path';
 import type { Harness, VibeEvent } from '@pooriaarab/vibe-core';
 import { makeEvent, notify as vibeCoreNotify } from '@pooriaarab/vibe-core';
 import { parseFrame, serializeFrame } from './frame.js';
+import { classifyHelloIdentity } from './identity.js';
 import { createPeerLink, type PeerLink } from './link.js';
 import { defaultStateDir } from './state.js';
 
@@ -46,9 +49,10 @@ export function leagueTopic(leagueName: string): Buffer {
 
 /**
  * The fields that ever leave the machine over a peer connection: handle, league,
- * harness, and (optionally) the self-asserted usage-verification flag. NEVER raw
- * usage — no token totals, no logs. `verified` is undefined for legacy peers
- * that predate it; both `undefined` and `false` display as unverified (~).
+ * harness, and (optionally) the self-asserted usage-verification flag plus the
+ * identity proof (pubkey/nonce/sig). NEVER raw usage — no token totals, no logs.
+ * `verified`/`pubkey` are undefined for legacy peers that predate them; both
+ * `undefined` and `false` display as unverified (~).
  */
 export interface PeerHello {
   readonly handle: string;
@@ -56,15 +60,25 @@ export interface PeerHello {
   readonly harness: string;
   /**
    * Self-asserted: the sender's usage came from real local logs (see readUsage).
-   * Not independently verifiable on its own — the identity signature (pubkey/sig)
-   * binds this claim to a persistent key when present.
+   * Bound to the sender's key by the identity signature when `pubkey` is present.
    */
   readonly verified?: boolean;
+  /** Raw ed25519 public key (64 hex) — the persistent identity this hello signs. */
+  readonly pubkey?: string;
+  /** Random per-hello nonce (hex) covered by the signature. */
+  readonly nonce?: string;
+  /** ed25519 signature (128 hex) over `handle|league|harness|verified|nonce`. */
+  readonly sig?: string;
+  /**
+   * LOCAL-DERIVED, never on the wire: true when this hello's signature verified
+   * against its pubkey (see classifyHelloIdentity). Marked 🔑 in the UI.
+   */
+  readonly identityVerified?: boolean;
 }
 
 /** One-line privacy notice printed before joining the swarm. */
 export const LIVE_NOTICE =
-  'live discovery: sharing only your handle + league + harness (never raw usage) with same-league peers on the public DHT';
+  'live discovery: sharing only your handle + league + harness + verified flag + identity pubkey (never raw usage) with same-league peers on the public DHT';
 
 /* Defensive caps so a malicious or buggy peer can't make us retain junk. */
 const MAX_HANDLE_LEN = 64;
@@ -86,6 +100,10 @@ export function serializeHandshake(hello: PeerHello): string {
     league: hello.league,
     harness: hello.harness,
     ...(hello.verified !== undefined ? { verified: hello.verified } : {}),
+    ...(hello.pubkey !== undefined ? { pubkey: hello.pubkey } : {}),
+    ...(hello.nonce !== undefined ? { nonce: hello.nonce } : {}),
+    ...(hello.sig !== undefined ? { sig: hello.sig } : {}),
+    // identityVerified is LOCAL-derived and deliberately never serialized.
   });
 }
 
@@ -117,6 +135,20 @@ export function parseHandshake(raw: string | Buffer): PeerHello | null {
   const harness = rec['harness'];
   const verified = rec['verified'];
   if (verified !== undefined && typeof verified !== 'boolean') return null;
+  // Identity proof: optional (legacy peers), but exactly-shaped hex when present
+  // — same discipline as the hello frame. Verification happens one layer up.
+  const pubkey = rec['pubkey'];
+  if (pubkey !== undefined && (typeof pubkey !== 'string' || !/^[0-9a-fA-F]{64}$/.test(pubkey))) {
+    return null;
+  }
+  const nonce = rec['nonce'];
+  if (nonce !== undefined && (typeof nonce !== 'string' || !/^[0-9a-fA-F]{1,64}$/.test(nonce))) {
+    return null;
+  }
+  const sig = rec['sig'];
+  if (sig !== undefined && (typeof sig !== 'string' || !/^[0-9a-fA-F]{128}$/.test(sig))) {
+    return null;
+  }
   return {
     handle,
     league,
@@ -125,6 +157,9 @@ export function parseHandshake(raw: string | Buffer): PeerHello | null {
         ? harness
         : 'unknown',
     ...(typeof verified === 'boolean' ? { verified } : {}),
+    ...(typeof pubkey === 'string' ? { pubkey } : {}),
+    ...(typeof nonce === 'string' ? { nonce } : {}),
+    ...(typeof sig === 'string' ? { sig } : {}),
   };
 }
 
@@ -136,6 +171,8 @@ export function parseHandshake(raw: string | Buffer): PeerHello | null {
 export interface StoredPeer extends PeerHello {
   readonly firstSeenAt: string;
   readonly lastSeenAt: string;
+  /** LOCAL metadata: when the last `msg` from this peer arrived (never on the wire). */
+  readonly lastMessageAt?: string;
 }
 
 function peersPath(dir: string): string {
@@ -173,13 +210,22 @@ export function recordPeer(
     league: hello.league,
     harness: hello.harness,
     ...(hello.verified !== undefined ? { verified: hello.verified } : {}),
+    ...(hello.pubkey !== undefined ? { pubkey: hello.pubkey } : {}),
+    ...(hello.identityVerified !== undefined ? { identityVerified: hello.identityVerified } : {}),
   };
   const existing = peers.findIndex((p) => p.handle === clean.handle);
   let isNew: boolean;
   let peer: StoredPeer;
   if (existing >= 0) {
     isNew = false;
-    peer = { ...clean, firstSeenAt: peers[existing]!.firstSeenAt, lastSeenAt: at };
+    const prev = peers[existing]!;
+    peer = {
+      ...clean,
+      firstSeenAt: prev.firstSeenAt,
+      lastSeenAt: at,
+      // lastMessageAt is local metadata — carried over, never reset by a hello.
+      ...(prev.lastMessageAt !== undefined ? { lastMessageAt: prev.lastMessageAt } : {}),
+    };
     peers[existing] = peer;
   } else {
     isNew = true;
@@ -189,6 +235,29 @@ export function recordPeer(
   mkdirSync(dir, { recursive: true });
   writeFileSync(peersPath(dir), JSON.stringify({ peers }, null, 2) + '\n', 'utf8');
   return { peer, isNew };
+}
+
+/**
+ * Stamp `lastMessageAt` on a stored peer (a `msg` just arrived from them).
+ * Local metadata only; never on the wire. Returns false when the handle isn't
+ * a known peer. Never throws — best-effort bookkeeping.
+ */
+export function recordPeerMessage(
+  handle: string,
+  dir: string = defaultStateDir(),
+  now: Date = new Date(),
+): boolean {
+  try {
+    const peers = loadPeers(dir);
+    const idx = peers.findIndex((p) => p.handle === handle);
+    if (idx < 0) return false;
+    peers[idx] = { ...peers[idx]!, lastMessageAt: now.toISOString() };
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(peersPath(dir), JSON.stringify({ peers }, null, 2) + '\n', 'utf8');
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 /* -------------------------------------------------------------------------- */
@@ -306,6 +375,9 @@ export async function startDiscovery(opts: DiscoveryOptions): Promise<DiscoveryS
         league: hello.league,
         harness: hello.harness,
         ...(hello.verified !== undefined ? { verified: hello.verified } : {}),
+        ...(hello.pubkey !== undefined ? { pubkey: hello.pubkey } : {}),
+        ...(hello.nonce !== undefined ? { nonce: hello.nonce } : {}),
+        ...(hello.sig !== undefined ? { sig: hello.sig } : {}),
       }) + '\n',
     );
 
@@ -325,13 +397,24 @@ export async function startDiscovery(opts: DiscoveryOptions): Promise<DiscoveryS
         const frame = parseFrame(line);
         if (frame === null) continue; // malformed/unknown — drop, never crash
         if (frame.t !== 'hello') continue; // frame #1 must be the hello
+        // Identity check BEFORE anything is retained: a hello claiming a pubkey
+        // whose signature doesn't verify is an impersonation attempt — the peer
+        // is DROPPED entirely (never recorded, never notified, never paired),
+        // exactly like a wrong-league or blocked peer. No pubkey → legacy peer,
+        // accepted but never identity-verified.
+        const verdict = classifyHelloIdentity(frame);
+        if (verdict === 'drop') continue;
         // Build the PeerHello from the allowlisted fields only — anything else
-        // a peer stuffed onto the frame was dropped by parseFrame.
+        // a peer stuffed onto the frame was dropped by parseFrame. nonce/sig are
+        // one-time proof material: verified above, then discarded, never retained.
         const peer: PeerHello = {
           handle: frame.handle,
           league: frame.league,
           harness: frame.harness,
           ...(frame.verified !== undefined ? { verified: frame.verified } : {}),
+          ...(verdict === 'verified' && frame.pubkey !== undefined
+            ? { pubkey: frame.pubkey, identityVerified: true }
+            : {}),
         };
         // The joined topic(s) scope which peers can reach us, but a peer could
         // still arrive on a shared topic advertising a league we don't accept
@@ -369,6 +452,11 @@ export async function startDiscovery(opts: DiscoveryOptions): Promise<DiscoveryS
         socket.off('data', onData);
         if (onLink !== undefined) {
           const link = createPeerLink(socket, peer, buf);
+          // Local metadata: every incoming msg stamps lastMessageAt on the
+          // persisted peer. Best-effort; never affects the link.
+          link.onMessage(() => {
+            recordPeerMessage(peer.handle, stateDir);
+          });
           onLink(link);
         }
         buf = '';
