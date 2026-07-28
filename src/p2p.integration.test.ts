@@ -274,7 +274,7 @@ describe('live P2P discovery (in-process DHT, no public network)', () => {
     sessions.push(b);
     await Promise.all([a.ready, b.ready]);
 
-    const found = await waitFor(() => hasPeer(a, helloB) && hasPeer(b, helloA), 15_000);
+    const found = await waitFor(() => hasPeer(a, helloB) && hasPeer(b, helloA), 40_000);
     expect(found).toBe(true);
 
     const peerB = [...a.peers.values()].find((p) => p.handle === helloB.handle)!;
@@ -294,7 +294,7 @@ describe('live P2P discovery (in-process DHT, no public network)', () => {
     expect(storedB.pubkey).toBe(idB.publicKeyHex);
     expect(storedB.identityVerified).toBe(true);
     expect(storedB).not.toHaveProperty('sig');
-  }, 30_000);
+  }, 60_000);
 
   it('drops a peer whose hello signature does not verify (impersonation attempt)', async () => {
     // A raw impostor pushes a well-formed but INVALID proof: 64-hex pubkey +

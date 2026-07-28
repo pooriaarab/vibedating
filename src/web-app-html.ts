@@ -440,6 +440,80 @@ export const webAppHtml = `<!DOCTYPE html>
     background: var(--danger); color: #2a0a0c;
   }
   .video-modal .vhangup:hover{ filter: brightness(1.06); }
+  .live-panel .lp-legend{ font-size: .66rem; color: var(--muted-2); margin-top: 8px; line-height: 1.4; }
+  .incoming-call{
+    position: fixed; inset: 0; z-index: 65;
+    display: flex; align-items: center; justify-content: center;
+    background: rgba(12,7,15,.6); backdrop-filter: blur(6px); -webkit-backdrop-filter: blur(6px);
+    opacity: 0; pointer-events: none; transition: opacity var(--dur-med) ease;
+  }
+  .incoming-call.is-open{ opacity: 1; pointer-events: auto; }
+  .incoming-call .ic-card{
+    background: linear-gradient(165deg, var(--bg-card), var(--bg-card-2));
+    border: 1px solid var(--border-2); border-radius: 24px; box-shadow: var(--shadow-3);
+    padding: 30px 28px; max-width: 320px; text-align: center;
+    transform: scale(.85) translateY(10px); transition: transform var(--dur-med) var(--ease-bounce);
+  }
+  .incoming-call.is-open .ic-card{ transform: scale(1) translateY(0); }
+  .incoming-call h3{ margin: 0 0 6px; font-size: 1.15rem; font-weight: 800; word-break: break-all; }
+  .incoming-call p{ color: var(--muted); font-size: .85rem; margin: 0 0 18px; }
+  .incoming-call .ic-actions{ display: flex; gap: 10px; }
+
+  /* ---- live text chat (browser <-> PeerLink over /live/message) ---- */
+  .live-actions{ display: flex; gap: 6px; flex-shrink: 0; }
+  .live-row .cbtn{
+    border: 1px solid var(--border-2); border-radius: 9px; padding: 7px 12px;
+    font-weight: 700; font-size: .76rem; background: transparent; color: var(--muted);
+    transition: color var(--dur-fast) ease, border-color var(--dur-fast) ease, transform var(--dur-fast) var(--ease-out);
+    flex-shrink: 0;
+  }
+  .live-row .cbtn:hover{ color: var(--fg); border-color: var(--muted-2); }
+  .live-row .cbtn:active{ transform: scale(.95); }
+  .live-row .cbtn.has-unread{ color: var(--coral); border-color: var(--coral); }
+  .chat-panel{
+    position: fixed; right: 18px; bottom: 18px; z-index: 45;
+    width: min(320px, calc(100vw - 36px));
+    background: linear-gradient(180deg, var(--bg-card), var(--bg-card-2));
+    border: 1px solid var(--border-2); border-radius: 16px; box-shadow: var(--shadow-2);
+    display: none; flex-direction: column; overflow: hidden;
+  }
+  .chat-panel.is-open{ display: flex; animation: rise var(--dur-med) var(--ease-out); }
+  .chat-panel .cp-head{
+    display: flex; align-items: center; justify-content: space-between; gap: 10px;
+    padding: 11px 14px; border-bottom: 1px solid var(--border);
+  }
+  .chat-panel .cp-title{ font-size: .84rem; font-weight: 700; word-break: break-all; }
+  .chat-panel .cp-sub{ font-size: .68rem; color: var(--muted-2); margin-top: 2px; }
+  .chat-panel .cp-close{
+    border: 0; background: transparent; color: var(--muted-2);
+    font-size: 1.15rem; line-height: 1; padding: 4px; flex-shrink: 0;
+  }
+  .chat-panel .cp-close:hover{ color: var(--fg); }
+  .chat-panel .cp-msgs{
+    padding: 12px 14px; min-height: 120px; max-height: 260px; overflow-y: auto;
+    display: flex; flex-direction: column; gap: 7px;
+  }
+  .chat-panel .cp-empty{ font-size: .76rem; color: var(--muted-2); text-align: center; margin: auto; }
+  .cp-msg{
+    max-width: 85%; padding: 7px 11px; border-radius: 13px;
+    font-size: .82rem; line-height: 1.4; word-break: break-word; white-space: pre-wrap;
+  }
+  .cp-msg.them{ align-self: flex-start; background: rgba(248,239,232,.07); border: 1px solid var(--border); }
+  .cp-msg.you{ align-self: flex-end; background: rgba(255,122,104,.16); border: 1px solid rgba(255,122,104,.32); }
+  .cp-msg.sys{ align-self: center; background: transparent; border: 0; color: var(--muted-2); font-size: .72rem; padding: 2px 6px; }
+  .chat-panel .cp-inputrow{ display: flex; gap: 8px; padding: 10px; border-top: 1px solid var(--border); }
+  .chat-panel .cp-inputrow input{
+    flex: 1; border: 1px solid var(--border-2); border-radius: 10px; background: rgba(0,0,0,.22);
+    color: var(--fg); padding: 9px 11px; font: inherit; font-size: .82rem; outline: none; min-width: 0;
+  }
+  .chat-panel .cp-inputrow input:focus{ border-color: var(--coral); }
+  .chat-panel .cp-send{
+    border: 0; border-radius: 10px; padding: 9px 14px; font-weight: 700; font-size: .8rem;
+    background: linear-gradient(180deg, var(--coral), var(--coral-dim)); color: #2a1109;
+    transition: filter var(--dur-fast) ease, transform var(--dur-fast) var(--ease-out);
+  }
+  .chat-panel .cp-send:hover{ filter: brightness(1.06); }
+  .chat-panel .cp-send:active{ transform: scale(.95); }
 </style>
 </head>
 <body>
@@ -584,9 +658,36 @@ export const webAppHtml = `<!DOCTYPE html>
   </div>
 </div>
 
-<aside class="live-panel" id="livePanel" aria-label="Live same-league peers">
-  <div class="lp-title"><span class="lp-dot" aria-hidden="true"></span> Live same-league peers</div>
+<aside class="live-panel" id="livePanel" aria-label="Live peers">
+  <div class="lp-title"><span class="lp-dot" aria-hidden="true"></span> Live peers</div>
   <div id="liveRows"></div>
+  <div class="lp-legend">&#10003; usage verified &middot; &#128273; identity verified &mdash; call someone, or wait for a call</div>
+</aside>
+
+<div class="incoming-call" id="incomingCall" role="dialog" aria-modal="true" aria-label="Incoming call">
+  <div class="ic-card">
+    <h3 id="incomingCaller">@peer</h3>
+    <p>is calling you &mdash; video chat</p>
+    <div class="ic-actions">
+      <button class="btn btn-ghost" id="declineBtn" type="button">Decline</button>
+      <button class="btn btn-primary" id="acceptBtn" type="button">Accept</button>
+    </div>
+  </div>
+</div>
+
+<aside class="chat-panel" id="chatPanel" aria-label="Text chat">
+  <div class="cp-head">
+    <div>
+      <div class="cp-title" id="chatTitle">@peer</div>
+      <div class="cp-sub" id="chatSub">live over the P2P link &middot; text only</div>
+    </div>
+    <button class="cp-close" id="chatClose" type="button" aria-label="Close chat">&times;</button>
+  </div>
+  <div class="cp-msgs" id="chatMsgs"></div>
+  <div class="cp-inputrow">
+    <input id="chatInput" type="text" maxlength="4000" placeholder="message&hellip;" autocomplete="off">
+    <button class="cp-send" id="chatSend" type="button">Send</button>
+  </div>
 </aside>
 
 <div class="video-modal" id="videoModal" role="dialog" aria-modal="true" aria-label="Video call">
@@ -893,9 +994,15 @@ export const webAppHtml = `<!DOCTYPE html>
   var remoteVideo = document.getElementById("remoteVideo");
   var remoteLabel = document.getElementById("remoteLabel");
   var hangupBtn = document.getElementById("hangupBtn");
+  var incomingCallEl = document.getElementById("incomingCall");
+  var incomingCaller = document.getElementById("incomingCaller");
+  var acceptBtn = document.getElementById("acceptBtn");
+  var declineBtn = document.getElementById("declineBtn");
 
   // One in-flight call's state. remoteHandle === null means idle.
   var rtc = { pc: null, localStream: null, remoteHandle: null, role: null };
+  // An incoming offer awaiting the user's accept/decline (never auto-answered).
+  var pendingOffer = null;
   var knownPeers = [];
   var idleIdx = 0;
 
@@ -1012,7 +1119,8 @@ export const webAppHtml = `<!DOCTYPE html>
   }
 
   // Idle listener: when not in a call, watch known peers round-robin so an
-  // incoming offer (the peer clicked THEIR Video button) is noticed and answered.
+  // incoming offer (the peer clicked THEIR Call button) is noticed. Offers are
+  // never auto-answered — the caller is named and the user accepts or declines.
   async function idleLoop(){
     while (true) {
       if (rtc.remoteHandle || knownPeers.length === 0) { await sleep(1000); continue; }
@@ -1024,13 +1132,34 @@ export const webAppHtml = `<!DOCTYPE html>
           var data = await res.json();
           var f = data && data.frame;
           if (f && f.t === "rtc-offer" && !rtc.pc && !rtc.remoteHandle) {
-            await answerIncomingOffer(peer.handle, f.sdp);
+            // One prompt at a time: a re-offer from the SAME caller refreshes
+            // the stored sdp; an offer from someone else while a prompt is up
+            // is dropped (their call simply fails to connect).
+            if (pendingOffer && pendingOffer.handle !== peer.handle) continue;
+            pendingOffer = { handle: peer.handle, sdp: f.sdp };
+            showIncomingPrompt(peer.handle);
           }
         }
       } catch(e){ /* abort/timeout — loop to next peer */ }
     }
   }
   idleLoop();
+
+  function showIncomingPrompt(handle){
+    incomingCaller.textContent = handle;
+    incomingCallEl.classList.add("is-open");
+  }
+  function clearIncomingPrompt(){
+    pendingOffer = null;
+    incomingCallEl.classList.remove("is-open");
+  }
+  acceptBtn.addEventListener("click", function(){
+    var p = pendingOffer;
+    clearIncomingPrompt();
+    if (!p) return;
+    answerIncomingOffer(p.handle, p.sdp).catch(function(){ hangup(); });
+  });
+  declineBtn.addEventListener("click", clearIncomingPrompt);
 
   function hangup(){
     try { if (rtc.pc) rtc.pc.close(); } catch(e){}
@@ -1047,7 +1176,171 @@ export const webAppHtml = `<!DOCTYPE html>
   }
   hangupBtn.addEventListener("click", hangup);
 
-  // Render the live-peers panel with a Video button each.
+  /* ---- Live text chat: msg frames over the same PeerLinks, via /live/message ----
+   * One long-poll loop per connected peer surfaces incoming texts immediately,
+   * no matter which conversation is open. Outbound texts POST {handle, text};
+   * the server re-validates through the frame allowlist and mints id/at. */
+  var chatPanel = document.getElementById("chatPanel");
+  var chatTitle = document.getElementById("chatTitle");
+  var chatSub = document.getElementById("chatSub");
+  var chatMsgs = document.getElementById("chatMsgs");
+  var chatInput = document.getElementById("chatInput");
+  var chatSend = document.getElementById("chatSend");
+  var chatClose = document.getElementById("chatClose");
+
+  var chatWith = null;      // handle of the open conversation (null = closed)
+  var conversations = {};   // handle -> [{from:"you"|"them"|"sys", text}]
+  var unread = {};          // handle -> count of unseen incoming messages
+  var chatLoops = {};       // handle -> true while its poll loop is running
+  var MAX_CHAT_KEPT = 200;  // per-conversation local cap (mirrors the server)
+
+  function fetchMessage(handle, timeoutMs){
+    var ctrl = new AbortController();
+    var t = setTimeout(function(){ ctrl.abort(); }, timeoutMs);
+    return fetch("/live/message?handle=" + encodeURIComponent(handle), { signal: ctrl.signal })
+      .then(function(r){ clearTimeout(t); return r; })
+      .catch(function(e){ clearTimeout(t); throw e; });
+  }
+
+  function postChat(handle, text){
+    return fetch("/live/message", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ handle: handle, text: text })
+    });
+  }
+
+  function peerKnown(handle){
+    for (var i = 0; i < knownPeers.length; i++){ if (knownPeers[i].handle === handle) return true; }
+    return false;
+  }
+
+  function pushChat(handle, entry){
+    var conv = conversations[handle] || (conversations[handle] = []);
+    conv.push(entry);
+    if (conv.length > MAX_CHAT_KEPT) conv.splice(0, conv.length - MAX_CHAT_KEPT);
+  }
+
+  // One long-poll loop per connected peer: started when the peer is first
+  // seen, stopped when it vanishes (its mailbox on the server is gone).
+  function ensureChatLoop(handle){
+    if (chatLoops[handle]) return;
+    chatLoops[handle] = true;
+    (async function(){
+      while (peerKnown(handle)) {
+        var res;
+        try { res = await fetchMessage(handle, 30000); }
+        catch(e){ await sleep(1000); continue; }
+        if (!res || res.status !== 200) { await sleep(1000); continue; }
+        var data = await res.json();
+        var m = data && data.message;
+        if (!m) continue; // timed out empty
+        pushChat(handle, { from: "them", text: m.text });
+        if (chatWith === handle) {
+          renderChat();
+        } else {
+          unread[handle] = (unread[handle] || 0) + 1;
+          renderLiveRows(knownPeers);
+        }
+      }
+      delete chatLoops[handle];
+    })();
+  }
+
+  function renderChat(){
+    chatMsgs.innerHTML = "";
+    var conv = (chatWith && conversations[chatWith]) || [];
+    if (conv.length === 0) {
+      var empty = document.createElement("div");
+      empty.className = "cp-empty";
+      empty.textContent = "No messages yet — say hi.";
+      chatMsgs.appendChild(empty);
+      return;
+    }
+    conv.forEach(function(m){
+      var el = document.createElement("div");
+      el.className = "cp-msg " + (m.from === "you" ? "you" : m.from === "sys" ? "sys" : "them");
+      // textContent only — a peer's text is never parsed as HTML.
+      el.textContent = m.text;
+      chatMsgs.appendChild(el);
+    });
+    chatMsgs.scrollTop = chatMsgs.scrollHeight;
+  }
+
+  function openChat(handle){
+    chatWith = handle;
+    delete unread[handle];
+    chatTitle.textContent = handle;
+    chatSub.textContent = peerKnown(handle)
+      ? "live over the P2P link · text only"
+      : "peer offline · messages will not deliver";
+    chatPanel.classList.add("is-open");
+    renderChat();
+    renderLiveRows(knownPeers);
+    chatInput.focus();
+  }
+  chatClose.addEventListener("click", function(){
+    chatWith = null;
+    chatPanel.classList.remove("is-open");
+  });
+
+  function sendChat(){
+    var target = chatWith;
+    var text = chatInput.value.trim();
+    if (!target || text === "") return;
+    chatInput.value = "";
+    postChat(target, text).then(function(res){
+      // Honest failure — never show a message as sent when it wasn't.
+      pushChat(target, res && res.status === 200
+        ? { from: "you", text: text }
+        : { from: "sys", text: "(not delivered — peer offline?)" });
+      if (chatWith === target) renderChat();
+    }).catch(function(){
+      pushChat(target, { from: "sys", text: "(not delivered — server unreachable)" });
+      if (chatWith === target) renderChat();
+    });
+  }
+  chatSend.addEventListener("click", sendChat);
+  chatInput.addEventListener("keydown", function(e){ if (e.key === "Enter") sendChat(); });
+
+  // Render the live-peers rows: one per connected peer with its verification
+  // marks, a Chat button (opens the conversation), and a Call button that
+  // rings THAT peer specifically.
+  function renderLiveRows(peers){
+    liveRows.innerHTML = "";
+    peers.forEach(function(p){
+      var row = document.createElement("div");
+      row.className = "live-row";
+      var who = document.createElement("div");
+      // Marks from the peer's hello, shown only when present: ✓ usage
+      // verified (real local logs), 🔑 identity-verified (signed hello).
+      var marks = (p.verified === true ? " ✓" : "") + (p.identityVerified === true ? " 🔑" : "");
+      var h = document.createElement("div"); h.className = "h"; h.textContent = p.handle + marks;
+      var s = document.createElement("div"); s.className = "s"; s.textContent = p.league + " \u00b7 " + p.harness;
+      who.appendChild(h); who.appendChild(s);
+      var actions = document.createElement("div");
+      actions.className = "live-actions";
+      var chatBtn = document.createElement("button");
+      chatBtn.className = "cbtn" + (unread[p.handle] ? " has-unread" : "");
+      chatBtn.type = "button";
+      chatBtn.textContent = "Chat" + (unread[p.handle] ? " (" + unread[p.handle] + ")" : "");
+      chatBtn.addEventListener("click", function(){ openChat(p.handle); });
+      var btn = document.createElement("button");
+      btn.className = "vbtn"; btn.type = "button"; btn.textContent = "Call";
+      btn.addEventListener("click", function(){
+        if (rtc.remoteHandle || pendingOffer) return; // already in a call / prompt
+        btn.disabled = true;
+        // DIRECTED call: the rtc-offer is relayed only to this peer's handle.
+        startCallAsOfferer(p.handle).catch(function(){ hangup(); });
+      });
+      actions.appendChild(chatBtn);
+      actions.appendChild(btn);
+      row.appendChild(who);
+      row.appendChild(actions);
+      liveRows.appendChild(row);
+    });
+  }
+
   async function refreshPeers(){
     try {
       var res = await fetch("/api/live/peers");
@@ -1055,26 +1348,15 @@ export const webAppHtml = `<!DOCTYPE html>
       var data = await res.json();
       var peers = (data && data.peers) || [];
       knownPeers = peers;
+      peers.forEach(function(p){ ensureChatLoop(p.handle); });
+      if (chatWith) {
+        chatSub.textContent = peerKnown(chatWith)
+          ? "live over the P2P link · text only"
+          : "peer offline · messages will not deliver";
+      }
       if (peers.length === 0) { livePanel.classList.remove("is-open"); return; }
       livePanel.classList.add("is-open");
-      liveRows.innerHTML = "";
-      peers.forEach(function(p){
-        var row = document.createElement("div");
-        row.className = "live-row";
-        var who = document.createElement("div");
-        var h = document.createElement("div"); h.className = "h"; h.textContent = p.handle;
-        var s = document.createElement("div"); s.className = "s"; s.textContent = p.league + " \u00b7 " + p.harness;
-        who.appendChild(h); who.appendChild(s);
-        var btn = document.createElement("button");
-        btn.className = "vbtn"; btn.type = "button"; btn.textContent = "Video";
-        btn.addEventListener("click", function(){
-          if (rtc.remoteHandle) return; // already in a call
-          btn.disabled = true;
-          startCallAsOfferer(p.handle).catch(function(){ btn.disabled = false; });
-        });
-        row.appendChild(who); row.appendChild(btn);
-        liveRows.appendChild(row);
-      });
+      renderLiveRows(peers);
     } catch(e){}
   }
   refreshPeers();
