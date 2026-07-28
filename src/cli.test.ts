@@ -115,6 +115,33 @@ describe('parseArgs — live --dating', () => {
   });
 });
 
+describe('parseArgs — handle command + positional arg', () => {
+  it('recognizes the handle subcommand', () => {
+    expect(parseArgs(['handle']).command).toBe('handle');
+  });
+
+  it('no positional → arg undefined (print current handle)', () => {
+    const p = parseArgs(['handle']);
+    expect(p.command).toBe('handle');
+    expect(p.arg).toBeUndefined();
+  });
+
+  it('captures the first positional as arg', () => {
+    expect(parseArgs(['handle', '@alice']).arg).toBe('@alice');
+    expect(parseArgs(['handle', 'alice']).arg).toBe('alice'); // leading '@' optional at parse time
+  });
+
+  it('does not capture the command token itself as arg', () => {
+    expect(parseArgs(['handle']).arg).toBeUndefined();
+  });
+
+  it('combines with flags without losing the arg', () => {
+    const p = parseArgs(['handle', '@x', '--bogus']);
+    expect(p.command).toBe('handle');
+    expect(p.arg).toBe('@x');
+  });
+});
+
 describe('parseArgs — --any flag', () => {
   it('defaults to false', () => {
     expect(parseArgs(['discover']).any).toBe(false);
