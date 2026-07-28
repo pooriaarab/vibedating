@@ -44,11 +44,22 @@ export function leagueTopic(leagueName: string): Buffer {
 /* Handshake                                                                  */
 /* -------------------------------------------------------------------------- */
 
-/** The ONLY three fields that ever leave the machine over a peer connection. */
+/**
+ * The fields that ever leave the machine over a peer connection: handle, league,
+ * harness, and (optionally) the self-asserted usage-verification flag. NEVER raw
+ * usage — no token totals, no logs. `verified` is undefined for legacy peers
+ * that predate it; both `undefined` and `false` display as unverified (~).
+ */
 export interface PeerHello {
   readonly handle: string;
   readonly league: string;
   readonly harness: string;
+  /**
+   * Self-asserted: the sender's usage came from real local logs (see readUsage).
+   * Not independently verifiable on its own — the identity signature (pubkey/sig)
+   * binds this claim to a persistent key when present.
+   */
+  readonly verified?: boolean;
 }
 
 /** One-line privacy notice printed before joining the swarm. */
@@ -74,6 +85,7 @@ export function serializeHandshake(hello: PeerHello): string {
     handle: hello.handle,
     league: hello.league,
     harness: hello.harness,
+    ...(hello.verified !== undefined ? { verified: hello.verified } : {}),
   });
 }
 
@@ -103,6 +115,8 @@ export function parseHandshake(raw: string | Buffer): PeerHello | null {
     return null;
   }
   const harness = rec['harness'];
+  const verified = rec['verified'];
+  if (verified !== undefined && typeof verified !== 'boolean') return null;
   return {
     handle,
     league,
@@ -110,6 +124,7 @@ export function parseHandshake(raw: string | Buffer): PeerHello | null {
       typeof harness === 'string' && harness.length > 0 && harness.length <= MAX_HARNESS_LEN
         ? harness
         : 'unknown',
+    ...(typeof verified === 'boolean' ? { verified } : {}),
   };
 }
 
@@ -149,15 +164,22 @@ export function recordPeer(
 ): { peer: StoredPeer; isNew: boolean } {
   const peers = loadPeers(dir);
   const at = now.toISOString();
-  // Built key-by-key from the allowlist — nothing beyond handle/league/harness
-  // is ever persisted, regardless of what the caller's object carries.
-  const clean: PeerHello = { handle: hello.handle, league: hello.league, harness: hello.harness };
+  // Built key-by-key from the allowlist — nothing beyond the PeerHello fields is
+  // ever persisted, regardless of what the caller's object carries. Optional
+  // fields are taken ONLY from this hello, so a stale value from an earlier
+  // sighting can never linger after a peer stops sending it.
+  const clean: PeerHello = {
+    handle: hello.handle,
+    league: hello.league,
+    harness: hello.harness,
+    ...(hello.verified !== undefined ? { verified: hello.verified } : {}),
+  };
   const existing = peers.findIndex((p) => p.handle === clean.handle);
   let isNew: boolean;
   let peer: StoredPeer;
   if (existing >= 0) {
     isNew = false;
-    peer = { ...peers[existing]!, ...clean, lastSeenAt: at };
+    peer = { ...clean, firstSeenAt: peers[existing]!.firstSeenAt, lastSeenAt: at };
     peers[existing] = peer;
   } else {
     isNew = true;
@@ -276,10 +298,15 @@ export async function startDiscovery(opts: DiscoveryOptions): Promise<DiscoveryS
     // Send our hello as the FIRST frame on the connection. The live protocol
     // unifies the old ad-hoc handshake line into a typed frame so the whole
     // stream (hello + chat) shares one newline-JSON frame channel. The payload
-    // is still ONLY { handle, league, harness } — raw usage is never on it.
+    // is still ONLY the allowlisted PeerHello fields — raw usage is never on it.
     socket.write(
-      serializeFrame({ t: 'hello', handle: hello.handle, league: hello.league, harness: hello.harness }) +
-        '\n',
+      serializeFrame({
+        t: 'hello',
+        handle: hello.handle,
+        league: hello.league,
+        harness: hello.harness,
+        ...(hello.verified !== undefined ? { verified: hello.verified } : {}),
+      }) + '\n',
     );
 
     // The hello handshake: buffer until the first line, parse it as a frame,
@@ -304,6 +331,7 @@ export async function startDiscovery(opts: DiscoveryOptions): Promise<DiscoveryS
           handle: frame.handle,
           league: frame.league,
           harness: frame.harness,
+          ...(frame.verified !== undefined ? { verified: frame.verified } : {}),
         };
         // The joined topic(s) scope which peers can reach us, but a peer could
         // still arrive on a shared topic advertising a league we don't accept

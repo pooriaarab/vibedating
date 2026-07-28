@@ -84,6 +84,47 @@ describe('serializeHandshake() / parseHandshake()', () => {
   });
 });
 
+describe('handshake — verified flag', () => {
+  it('round-trips a hello carrying verified', () => {
+    const v: PeerHello = { ...alice, verified: true };
+    expect(parseHandshake(serializeHandshake(v))).toEqual(v);
+  });
+
+  it('emits no verified key when the hello has none (legacy wire shape)', () => {
+    const wire = JSON.parse(serializeHandshake(alice)) as Record<string, unknown>;
+    expect(Object.keys(wire).sort()).toEqual(['handle', 'harness', 'league']);
+  });
+
+  it('accepts a peer-sent verified flag, rejects a non-boolean one', () => {
+    expect(
+      parseHandshake(JSON.stringify({ handle: '@a', league: '10M', verified: false })),
+    ).toEqual({ handle: '@a', league: '10M', harness: 'unknown', verified: false });
+    expect(
+      parseHandshake(JSON.stringify({ handle: '@a', league: '10M', verified: 'true' })),
+    ).toBeNull();
+  });
+
+  it('recordPeer persists verified when present, and drops it when a re-sighting omits it', () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), 'vibedating-peers-verified-'));
+    try {
+      recordPeer({ ...alice, verified: true }, dir);
+      expect(loadPeers(dir)[0]).toMatchObject({ handle: '@alice', verified: true });
+      recordPeer(alice, dir); // same handle, no verified this time
+      const peer = loadPeers(dir)[0]!;
+      expect(peer).not.toHaveProperty('verified');
+      expect(Object.keys(peer).sort()).toEqual([
+        'firstSeenAt',
+        'handle',
+        'harness',
+        'lastSeenAt',
+        'league',
+      ]);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
 describe('recordPeer() / loadPeers()', () => {
   let dir: string;
   beforeEach(() => {

@@ -24,6 +24,7 @@ import {
   matches,
   readUsage,
   type Harness,
+  type LocalUsageSnapshot,
 } from './index.js';
 import {
   LIVE_NOTICE,
@@ -48,6 +49,7 @@ import {
   resolveHandle,
   sameHandle,
   saveHandle,
+  type ProfileState,
 } from './state.js';
 import { createLiveBridge, startServer, type LiveBridge } from './server.js';
 import { runMcp } from './mcp.js';
@@ -201,6 +203,30 @@ function leagueLabel(name: string): string {
   return name === 'below-1M' ? 'below 1M (not yet in a league)' : `${name} League`;
 }
 
+/** Compact token count for LOCAL display: 19_200_000_000 → "19.2B", 23_400_000 → "23.4M". */
+function formatTokens(n: number): string {
+  const trim = (v: number): string => String(Math.round(v * 10) / 10);
+  const abs = Math.abs(n);
+  if (abs >= 1e9) return `${trim(n / 1e9)}B`;
+  if (abs >= 1e6) return `${trim(n / 1e6)}M`;
+  if (abs >= 1e3) return `${trim(n / 1e3)}k`;
+  return String(n);
+}
+
+/**
+ * Honest verification line for `connect` — where the usage number ACTUALLY came
+ * from. Only `source === 'real'` (the harness's own local logs, read by
+ * vibe-core) is "verified"; self-report and demo are labeled as what they are.
+ * The token total is shown only here, on the local machine — never on the wire.
+ */
+function verificationText(snapshot: LocalUsageSnapshot): string {
+  if (snapshot.source === 'real') {
+    return `verified: real usage — ${formatTokens(snapshot.totalTokens)} tokens from ${snapshot.harness} logs`;
+  }
+  if (snapshot.source === 'self-report') return 'self-reported (unverified)';
+  return 'demo (unverified)';
+}
+
 /**
  * Build the DHT topics + league-accept predicate for a live session.
  *
@@ -252,6 +278,31 @@ function peerDirection(
   return { bullet: sameBullet, qual: '' };
 }
 
+/**
+ * The hello we broadcast: profile fields + the honest usage-verification flag
+ * (true only when connect measured real local logs). Never any raw usage.
+ */
+function buildHello(profile: ProfileState): PeerHello {
+  return {
+    handle: resolveHandle(),
+    league: profile.league,
+    harness: profile.harness,
+    verified: profile.verified,
+  };
+}
+
+/**
+ * Usage-verification mark for a peer: ✓ when their hello carried
+ * `verified: true` (usage measured from real local logs), ~ otherwise
+ * (self-reported, demo, or a legacy peer that predates the flag).
+ */
+function usageMark(peer: { verified?: boolean }): string {
+  return peer.verified === true ? '✓' : '~';
+}
+
+/** One-line legend printed wherever peer marks are shown. */
+const MARKS_LEGEND = 'marks: ✓ usage verified (real local logs) · ~ unverified (self-report/demo/legacy)';
+
 async function cmdConnect(): Promise<number> {
   const harness: Harness = (process.env['VIBEDATING_HARNESS'] as Harness | undefined) ?? 'claude-code';
   const handle = resolveHandle();
@@ -261,9 +312,7 @@ async function cmdConnect(): Promise<number> {
   process.stdout.write('\n');
   process.stdout.write(`  ${leagueLabel(lg.name)}\n`);
   process.stdout.write(`  handle: ${profile.handle}  ·  harness: ${profile.harness}\n`);
-  process.stdout.write(
-    `  verification: ${profile.verified ? 'verified (read-only OAuth)' : 'self-reported'}\n`,
-  );
+  process.stdout.write(`  verification: ${verificationText(snapshot)}\n`);
   process.stdout.write('\n');
   process.stdout.write('  • raw usage stays local · only league shared\n\n');
   return 0;
@@ -318,10 +367,11 @@ async function cmdMatches(live: boolean): Promise<number> {
   if (livePeers.length > 0) {
     process.stdout.write(`Your league: ${leagueLabel(profile.league)}\n`);
     process.stdout.write(
-      `${livePeers.length} live peer${livePeers.length === 1 ? '' : 's'} in range (discovered over the DHT):\n\n`,
+      `${livePeers.length} live peer${livePeers.length === 1 ? '' : 's'} in range (discovered over the DHT):\n`,
     );
+    process.stdout.write(`  ${MARKS_LEGEND}\n\n`);
     for (const p of livePeers) {
-      process.stdout.write(`  ${p.handle.padEnd(28)} ${p.league} · ${p.harness}\n`);
+      process.stdout.write(`  ${p.handle.padEnd(28)} ${p.league} · ${p.harness} ${usageMark(p)}\n`);
     }
     process.stdout.write('\n');
     return 0;
@@ -362,13 +412,10 @@ async function cmdDiscover(live: boolean, any: boolean): Promise<number> {
     return 1;
   }
 
-  const hello: PeerHello = {
-    handle: resolveHandle(),
-    league: profile.league,
-    harness: profile.harness,
-  };
+  const hello = buildHello(profile);
   process.stdout.write('\n');
   process.stdout.write(`  ${LIVE_NOTICE}\n`);
+  process.stdout.write(`  ${MARKS_LEGEND}\n`);
 
   const { topics, acceptLeague } = discoveryScope(profile.league, any);
   const session = await startDiscovery({
@@ -379,7 +426,7 @@ async function cmdDiscover(live: boolean, any: boolean): Promise<number> {
     onPeer: (peer, isNew) => {
       const { bullet, qual } = peerDirection(profile.league, peer.league);
       process.stdout.write(
-        `  ${bullet} ${peer.handle} (${peer.league}${qual} · ${peer.harness})${isNew ? '  ← new match' : ''}\n`,
+        `  ${bullet} ${peer.handle} (${peer.league}${qual} · ${peer.harness}) ${usageMark(peer)}${isNew ? '  ← new match' : ''}\n`,
       );
     },
   });
@@ -430,11 +477,7 @@ async function cmdOpen(port: number | undefined): Promise<number> {
   const started = await startServer({ port, live });
   if (profile && live) {
     process.stdout.write(`\n  ${LIVE_NOTICE}\n`);
-    const hello: PeerHello = {
-      handle: resolveHandle(),
-      league: profile.league,
-      harness: profile.harness,
-    };
+    const hello = buildHello(profile);
     void startDiscovery({ hello, isBlocked: blockedChecker(), onLink: (link) => live!.addLink(link) })
       .then((s) => {
         session = s;
@@ -491,13 +534,10 @@ async function cmdLive(dating: boolean, any: boolean, to: string | undefined): P
     return 1;
   }
 
-  const hello: PeerHello = {
-    handle: resolveHandle(),
-    league: profile.league,
-    harness: profile.harness,
-  };
+  const hello = buildHello(profile);
   process.stdout.write('\n');
   process.stdout.write(`  ${LIVE_NOTICE}\n`);
+  process.stdout.write(`  ${MARKS_LEGEND}\n`);
   process.stdout.write(
     target !== null
       ? `  targeted — auto-opening ${target} when they connect (/quit to stop)\n`
@@ -514,7 +554,7 @@ async function cmdLive(dating: boolean, any: boolean, to: string | undefined): P
     }
     const { qual } = peerDirection(profile.league, link.hello.league);
     process.stdout.write(
-      `  · matched ${link.hello.handle} (${link.hello.league}${qual} · ${link.hello.harness})\n`,
+      `  · matched ${link.hello.handle} (${link.hello.league}${qual} · ${link.hello.harness}) ${usageMark(link.hello)}\n`,
     );
     link.onMessage((m) => {
       process.stdout.write(`  <${link.hello.handle}> ${m.text}\n`);
@@ -534,7 +574,7 @@ async function cmdLive(dating: boolean, any: boolean, to: string | undefined): P
       if (target !== null && !sameHandle(link.hello.handle, target)) {
         const { qual } = peerDirection(profile.league, link.hello.league);
         process.stdout.write(
-          `  + ${link.hello.handle} (${link.hello.league}${qual}) — not your target\n`,
+          `  + ${link.hello.handle} (${link.hello.league}${qual}) ${usageMark(link.hello)} — not your target\n`,
         );
         link.close();
         return;
@@ -624,13 +664,10 @@ async function cmdFind(targetArg: string | undefined, any: boolean): Promise<num
     return 1;
   }
 
-  const hello: PeerHello = {
-    handle: resolveHandle(),
-    league: profile.league,
-    harness: profile.harness,
-  };
+  const hello = buildHello(profile);
   process.stdout.write('\n');
   process.stdout.write(`  ${LIVE_NOTICE}\n`);
+  process.stdout.write(`  ${MARKS_LEGEND}\n`);
   process.stdout.write(
     `  looking for ${target} in your league${any ? ' (+ every league)' : ' + adjacent'}…\n`,
   );
@@ -646,9 +683,13 @@ async function cmdFind(targetArg: string | undefined, any: boolean): Promise<num
       const { qual } = peerDirection(profile.league, peer.league);
       if (sameHandle(peer.handle, target)) {
         found = true;
-        process.stdout.write(`  ★ found ${peer.handle} (${peer.league}${qual} · ${peer.harness})\n`);
+        process.stdout.write(
+          `  ★ found ${peer.handle} (${peer.league}${qual} · ${peer.harness}) ${usageMark(peer)}\n`,
+        );
       } else {
-        process.stdout.write(`  + ${peer.handle} (${peer.league}${qual}) — not your target\n`);
+        process.stdout.write(
+          `  + ${peer.handle} (${peer.league}${qual}) ${usageMark(peer)} — not your target\n`,
+        );
       }
     },
   });
