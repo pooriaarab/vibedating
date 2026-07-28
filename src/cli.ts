@@ -70,7 +70,7 @@ import { createLiveBridge, createRoomBridge, startServer, type LiveBridge, type 
 import { runMcp } from './mcp.js';
 
 /** Mirrors package.json version (kept here; package.json imports are brittle under bundling). */
-const VERSION = '0.7.2';
+const VERSION = '0.8.0';
 
 /** Recognized top-level commands, plus the synthetic help/version. */
 export type Command =
@@ -1335,7 +1335,7 @@ Usage:
                                 --room <name> opens the room view instead: roster +
                                 group chat + full-mesh group video (~6 people; an SFU
                                 is the upgrade path for bigger rooms).
-  vibedating mcp                Run the stdio MCP server (profile, matches)
+  vibedating mcp                Run the stdio MCP server (full agent-native tools: live/room/discover/media)
   vibedating --version
   vibedating --help
 
