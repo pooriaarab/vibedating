@@ -197,10 +197,23 @@ export function createLiveBridge(): LiveBridge {
 /* Room bridge (browser <-> local server <-> RoomSession)                     */
 /* -------------------------------------------------------------------------- */
 
-/** Cap on queued rtc-* frames per member in a room bridge — beyond it the
- *  OLDEST are dropped, so a chatty signaling peer can't grow memory unbounded
- *  when the browser never polls. Mirrors {@link MAX_QUEUED_MESSAGES}. */
+/** Cap on queued rtc-* frames in a room bridge — beyond it the OLDEST are
+ *  dropped, so a chatty signaling peer can't grow memory unbounded when the
+ *  browser never polls. Mirrors {@link MAX_QUEUED_MESSAGES}. */
 const MAX_QUEUED_ROOM_SIGNALS = 200;
+
+/**
+ * One queued full-mesh WebRTC signal, already tagged with the sender handle so
+ * the browser can route it to the right RTCPeerConnection. The local browser
+ * long-polls a single merged mailbox (GET /room/signal?handle=SELF) — unlike
+ * 1:1 live signaling which has one mailbox per remote peer.
+ */
+export interface RoomSignal {
+  /** Sender's handle (from the validated hello — UNTRUSTED display data). */
+  readonly from: string;
+  /** The rtc-offer / rtc-answer / rtc-ice frame payload. */
+  readonly rtc: RtcFrame;
+}
 
 /**
  * Bridge between the browser and a multi-peer {@link RoomSession}.
@@ -233,8 +246,10 @@ export interface RoomBridge {
   pollMessage(timeoutMs: number): Promise<RoomMessage | null>;
   /** Send one rtc-* signaling frame to the member identified by `handle`. */
   sendSignal(handle: string, frame: RtcFrame): void;
-  /** Long-poll for the next incoming rtc-* frame from `handle`. */
-  pollSignal(handle: string, timeoutMs: number): Promise<RtcFrame | null>;
+  /** Long-poll for the next incoming rtc-* frame in the room mesh mailbox.
+   *  `handle` is the local SELF handle (the browser's identity); the returned
+   *  {@link RoomSignal} carries the *sender* so the mesh can route it. */
+  pollSignal(handle: string, timeoutMs: number): Promise<RoomSignal | null>;
 }
 
 /** Build a {@link RoomBridge} for a named room. Holds no resources of its own;
@@ -246,9 +261,10 @@ export function createRoomBridge(name: string): RoomBridge {
 
   const messageQueue: RoomMessage[] = [];
   const messageWaiters: Array<(m: RoomMessage | null) => void> = [];
-  // Per-sender rtc-* frame queues (the mesh: each member is signaled by handle).
-  const signalBoxes = new Map<string, RtcFrame[]>();
-  const signalWaiters = new Map<string, Array<(f: RtcFrame | null) => void>>();
+  // Single merged mailbox of sender-tagged rtc-* frames. The browser long-polls
+  // once (GET /room/signal?handle=SELF) and routes each signal by `from`.
+  const signalQueue: RoomSignal[] = [];
+  const signalWaiters: Array<(s: RoomSignal | null) => void> = [];
 
   const drainMessage = (m: RoomMessage): void => {
     // AEGIS-lite: peer text is UNTRUSTED display data — sanitized at ingress
@@ -267,23 +283,15 @@ export function createRoomBridge(name: string): RoomBridge {
   };
 
   const drainSignal = (from: string, frame: RtcFrame): void => {
-    const waiters = signalWaiters.get(from);
-    if (waiters !== undefined && waiters.length > 0) {
-      const w = waiters.shift();
-      if (w !== undefined) {
-        if (waiters.length === 0) signalWaiters.delete(from);
-        w(frame);
-        return;
-      }
+    const tagged: RoomSignal = { from, rtc: frame };
+    const waiter = signalWaiters.shift();
+    if (waiter !== undefined) {
+      waiter(tagged);
+      return;
     }
-    let box = signalBoxes.get(from);
-    if (box === undefined) {
-      box = [];
-      signalBoxes.set(from, box);
-    }
-    box.push(frame);
-    if (box.length > MAX_QUEUED_ROOM_SIGNALS) {
-      box.splice(0, box.length - MAX_QUEUED_ROOM_SIGNALS);
+    signalQueue.push(tagged);
+    if (signalQueue.length > MAX_QUEUED_ROOM_SIGNALS) {
+      signalQueue.splice(0, signalQueue.length - MAX_QUEUED_ROOM_SIGNALS);
     }
   };
 
@@ -329,27 +337,20 @@ export function createRoomBridge(name: string): RoomBridge {
     sendSignal(handle, frame) {
       session?.sendSignal(handle, frame);
     },
-    async pollSignal(handle, timeoutMs) {
-      const box = signalBoxes.get(handle);
-      if (box !== undefined && box.length > 0) return box.shift() ?? null;
-      return new Promise<RtcFrame | null>((resolve) => {
+    async pollSignal(_handle, timeoutMs) {
+      // `_handle` is SELF (the local browser's identity). The mailbox is already
+      // scoped to this process's RoomSession — every onSignal callback fires
+      // for frames addressed *to us*, tagged with the remote sender.
+      if (signalQueue.length > 0) return signalQueue.shift() ?? null;
+      return new Promise<RoomSignal | null>((resolve) => {
         const timer = setTimeout(() => {
-          const waiters = signalWaiters.get(handle);
-          if (waiters !== undefined) {
-            const idx = waiters.indexOf(resolve);
-            if (idx >= 0) waiters.splice(idx, 1);
-            if (waiters.length === 0) signalWaiters.delete(handle);
-          }
+          const idx = signalWaiters.indexOf(resolve);
+          if (idx >= 0) signalWaiters.splice(idx, 1);
           resolve(null);
         }, timeoutMs);
-        let waiters = signalWaiters.get(handle);
-        if (waiters === undefined) {
-          waiters = [];
-          signalWaiters.set(handle, waiters);
-        }
-        waiters.push((f) => {
+        signalWaiters.push((s) => {
           clearTimeout(timer);
-          resolve(f);
+          resolve(s);
         });
       });
     },
@@ -747,9 +748,10 @@ async function handle(
     return;
   }
 
-  // GET /room/signal?handle=<memberHandle>  — long-poll for the next incoming
-  // rtc-* frame from that member (full-mesh: one poll per member). Returns
-  // {frame} or {frame: null} on timeout.
+  // GET /room/signal?handle=<SELF>  — long-poll the merged full-mesh mailbox
+  // for the next incoming rtc-* frame from ANY room member. Returns
+  // { frame: { from, rtc } } so the browser can route to the right PC, or
+  // { frame: null } on timeout. (`handle` is the local member's identity.)
   if (req.method === 'GET' && pathname === '/room/signal') {
     const room = opts.room;
     if (!room) {
