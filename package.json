@@ -1,6 +1,6 @@
 {
   "name": "vibedate",
-  "version": "0.7.1",
+  "version": "0.7.2",
   "description": "Dating by tokens — matched by usage league across agentic CLIs. Raw usage stays local; only your league is shared. CLI + local web app + MCP. Local-first.",
   "type": "module",
   "license": "MIT",
