@@ -37,11 +37,19 @@ import {
 } from './p2p.js';
 import { loadOrCreateIdentity, signHelloClaims } from './identity.js';
 import { ensureHandle } from './handlegen.js';
+import {
+  daemonStatus,
+  removeDaemonState,
+  startDaemon,
+  stopDaemon,
+  writeDaemonState,
+} from './daemon.js';
 import { createPairing } from './pairing.js';
 import {
   addBlock,
   canShareLive,
   connectProfile,
+  defaultStateDir,
   grantLiveConsent,
   isBlocked,
   loadBlocklist,
@@ -71,6 +79,7 @@ export type Command =
   | 'block'
   | 'unblock'
   | 'blocklist'
+  | 'daemon'
   | 'mcp'
   | 'help'
   | 'version'
@@ -186,6 +195,7 @@ export function parseArgs(argv: readonly string[]): ParsedArgs {
       a === 'block' ||
       a === 'unblock' ||
       a === 'blocklist' ||
+      a === 'daemon' ||
       a === 'mcp' ||
       a === 'help'
         ? a
@@ -804,6 +814,98 @@ async function cmdBlocklist(): Promise<number> {
   return 0;
 }
 
+/**
+ * `vibedate daemon run` — the actual daemon process (spawned detached by
+ * `daemon start`, or directly by the installed launchd/systemd service).
+ * NOTIFY-ONLY: joins discovery and fires a vibe-core notify() on each NEW
+ * match (inside startDiscovery) — it never passes onLink, so chat/video are
+ * never auto-opened. Needs NO stdin: runs until SIGTERM/SIGINT, so it works
+ * unattended/backgrounded (no EOF death).
+ */
+async function cmdDaemonRun(any: boolean): Promise<number> {
+  const profile = loadProfile();
+  if (!profile) {
+    process.stderr.write('Not connected yet. Run `vibedating connect` first.\n');
+    return 1;
+  }
+  // Consent-gated exactly like `live`/`open`: invoking the daemon IS the opt-in.
+  if (!canShareLive()) grantLiveConsent();
+  const dir = defaultStateDir();
+  writeDaemonState(dir, { pid: process.pid, startedAt: new Date().toISOString(), any, version: VERSION });
+
+  const hello = buildHello(profile);
+  const { topics, acceptLeague } = discoveryScope(profile.league, any);
+  const session = await startDiscovery({
+    hello,
+    topics,
+    acceptLeague,
+    isBlocked: blockedChecker(),
+    onPeer: (peer, isNew) => {
+      process.stdout.write(
+        `  [${new Date().toISOString()}] ${isNew ? 'NEW match' : 'peer seen'}: ${peer.handle} (${peer.league} · ${peer.harness})\n`,
+      );
+    },
+  });
+  process.stdout.write(
+    `  vibedating daemon running (pid ${process.pid}) — notify-only${any ? ' · --any' : ''}\n`,
+  );
+
+  await new Promise<void>((resolve) => {
+    process.once('SIGINT', () => resolve());
+    process.once('SIGTERM', () => resolve());
+  });
+  await session.close();
+  removeDaemonState(dir);
+  process.stdout.write('  daemon stopped\n');
+  return 0;
+}
+
+/**
+ * `vibedate daemon [start|stop|status]` — manage the notify-only background
+ * daemon. `run` is the internal foreground entry (used by start/launchd/systemd).
+ */
+async function cmdDaemon(arg: string | undefined, any: boolean): Promise<number> {
+  switch (arg) {
+    case 'start': {
+      if (loadProfile() === null) {
+        process.stderr.write('Not connected yet. Run `vibedating connect` first.\n');
+        return 1;
+      }
+      const r = startDaemon({ any, version: VERSION });
+      if (!r.started) {
+        process.stdout.write(`  ${r.reason}\n`);
+        return 0;
+      }
+      process.stdout.write(`  daemon started (pid ${r.pid}) — notify-only: alerts on NEW matches, never opens chat/video\n`);
+      process.stdout.write(`  logs: ~/.vibedating/daemon.log · stop: vibedate daemon stop\n`);
+      return 0;
+    }
+    case 'stop': {
+      const r = await stopDaemon();
+      process.stdout.write(
+        r.stopped ? `  daemon stopped (pid ${r.pid})\n` : `  ${r.reason}\n`,
+      );
+      return 0;
+    }
+    case 'status': {
+      const s = daemonStatus();
+      if (s.running && s.state !== null) {
+        process.stdout.write(
+          `  daemon running (pid ${s.state.pid}) since ${s.state.startedAt}${s.state.any ? ' · --any' : ''}\n`,
+        );
+      } else {
+        process.stdout.write('  daemon not running\n');
+      }
+      return 0;
+    }
+    case 'run':
+      return cmdDaemonRun(any);
+    default:
+      process.stderr.write('usage: vibedating daemon [start|stop|status] [--any]\n');
+      return 1;
+  }
+}
+
 const HELP = `vibedating ${VERSION} — dating by tokens (local-first)
 
 Usage:
@@ -816,6 +918,8 @@ Usage:
   vibedating block <@handle>    Block a handle — their hello is dropped (never recorded/paired)
   vibedating unblock <@handle>  Remove a handle from the blocklist
   vibedating blocklist          List blocked handles
+  vibedating daemon [start|stop|status] [--any]  Manage the notify-only background
+                                daemon — alerts on NEW matches, never opens chat/video
   vibedating open [--port N] [--any]  Serve the local web app (default: random port)
                                 + live video + chat with connected peers
                                 (your league + adjacent; --any = every league)
@@ -863,6 +967,8 @@ async function main(argv: readonly string[]): Promise<number> {
       return cmdUnblock(parsed.arg);
     case 'blocklist':
       return cmdBlocklist();
+    case 'daemon':
+      return cmdDaemon(parsed.arg, parsed.any);
     case 'matches':
       return cmdMatches(parsed.live);
     case 'discover':
