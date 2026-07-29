@@ -532,7 +532,18 @@ async function handle(
   const pathname = url.pathname;
 
   if (req.method === 'GET' && pathname === '/') {
-    send(res, 200, 'text/html; charset=utf-8', webAppHtml);
+    const turnUrl = process.env['VIBEDATE_TURN_URL'];
+    let html = webAppHtml;
+    if (turnUrl) {
+      const turnUser = process.env['VIBEDATE_TURN_USER'];
+      const turnCred = process.env['VIBEDATE_TURN_CRED'];
+      const server: any = { urls: turnUrl };
+      if (turnUser) server.username = turnUser;
+      if (turnCred) server.credential = turnCred;
+      const script = `<script>window.__VIBE_ICE__={iceServers:${JSON.stringify([server]).replace(/</g, '\\u003c')}};</script>`;
+      html = html.replace('<script>', script + '\n<script>');
+    }
+    send(res, 200, 'text/html; charset=utf-8', html);
     return;
   }
 

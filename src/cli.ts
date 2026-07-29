@@ -561,7 +561,13 @@ async function cmdDiscover(live: boolean, any: boolean, viaRelay: boolean): Prom
   return 0;
 }
 
-async function cmdOpen(port: number | undefined, any: boolean, room: string | undefined): Promise<number> {
+async function cmdOpen(
+  port: number | undefined,
+  any: boolean,
+  room: string | undefined,
+  viaRelay: boolean,
+  to: string | undefined,
+): Promise<number> {
   // Attach a live-signaling bridge IF the user has connected a profile, so the
   // web app can reach real peers. `open` is treated as the live opt-in exactly
   // like `live` / `discover --live` (the command invocation grants consent), and
@@ -609,20 +615,47 @@ async function cmdOpen(port: number | undefined, any: boolean, room: string | un
           /* offline / DHT unreachable — web app still works, room just has no members yet */
         });
     } else if (live) {
-      const { topics, acceptLeague } = discoveryScope(profile.league, any);
-      void startDiscovery({
-        hello,
-        topics,
-        acceptLeague,
-        isBlocked: blockedChecker(),
-        onLink: (link) => live!.addLink(link),
-      })
-        .then((s) => {
-          session = s;
+      if (viaRelay && to !== undefined) {
+        const target = normalizeHandle(to);
+        const peer = target ? loadPeers().find((p) => sameHandle(p.handle, target) && typeof p.pubkey === 'string') : undefined;
+        if (peer && peer.pubkey) {
+          const peerPubkey = peer.pubkey;
+          void (async () => {
+            try {
+              const myNostr = await loadOrCreateNostrKey();
+              const transport = await createNostrPoolTransport();
+              const identity = loadOrCreateIdentity();
+              const link = await createNostrRelayLink({
+                myNostr,
+                myEd25519Hex: identity.publicKeyHex,
+                peerEd25519Hex: peerPubkey,
+                hello: peer,
+                transport,
+              });
+              live!.addLink(link);
+            } catch {
+              /* offline or relay unavailable */
+            }
+          })();
+        } else {
+          process.stderr.write(`\n  warning: --via-relay peer ${to} not found or lacks identity pubkey.\n`);
+        }
+      } else {
+        const { topics, acceptLeague } = discoveryScope(profile.league, any);
+        void startDiscovery({
+          hello,
+          topics,
+          acceptLeague,
+          isBlocked: blockedChecker(),
+          onLink: (link) => live!.addLink(link),
         })
-        .catch(() => {
-          /* offline / DHT unreachable — web app still works, live just has no peers yet */
-        });
+          .then((s) => {
+            session = s;
+          })
+          .catch(() => {
+            /* offline / DHT unreachable — web app still works, live just has no peers yet */
+          });
+      }
     }
   }
   process.stdout.write(`\n  vibedating local web app → ${started.url}\n`);
@@ -1431,7 +1464,7 @@ async function main(argv: readonly string[]): Promise<number> {
     case 'discover':
       return cmdDiscover(parsed.live, parsed.any, parsed.viaRelay);
     case 'open':
-      return cmdOpen(parsed.port, parsed.any, parsed.room);
+      return cmdOpen(parsed.port, parsed.any, parsed.room, parsed.viaRelay, parsed.to);
     case 'live':
       return cmdLive(parsed.dating, parsed.any, parsed.to, parsed.keepAlive, parsed.viaRelay);
     case 'find':
