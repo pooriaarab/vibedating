@@ -1,0 +1,30 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.pooriaarab/vibedate",
+  "description": "Dating by tokens, matched by usage league across agentic CLIs. Local-first.",
+  "version": "0.8.7",
+  "repository": {
+    "url": "https://github.com/pooriaarab/vibedating",
+    "source": "github",
+    "id": "1312340866"
+  },
+  "packages": [
+    {
+      "registryType": "npm",
+      "registryBaseUrl": "https://registry.npmjs.org",
+      "identifier": "vibedate",
+      "version": "0.8.7",
+      "transport": {
+        "type": "stdio"
+      },
+      "runtimeHint": "npx",
+      "packageArguments": [
+        {
+          "type": "positional",
+          "valueHint": "subcommand",
+          "value": "mcp"
+        }
+      ]
+    }
+  ]
+}
