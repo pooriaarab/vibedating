@@ -363,7 +363,11 @@ export async function startDiscovery(opts: DiscoveryOptions): Promise<DiscoveryS
   // Imported lazily so non-live commands (`matches`, `mcp`, `--help`) never pay
   // for hyperswarm's native stack (udx/sodium) — it loads on first live use.
   const { default: Hyperswarm } = await import('hyperswarm');
-  const swarm = new Hyperswarm(opts.bootstrap === undefined ? {} : { bootstrap: opts.bootstrap });
+  // Explicit opt wins; otherwise VIBEDATE_BOOTSTRAP ("host:port,host:port") points
+  // every live path (CLI, MCP, rooms) at a local testnet so the multi-process test
+  // harness runs hermetically instead of on the public DHT.
+  const bootstrap = opts.bootstrap ?? parseBootstrapEnv(process.env['VIBEDATE_BOOTSTRAP']);
+  const swarm = new Hyperswarm(bootstrap === undefined ? {} : { bootstrap });
 
   // Join only after the DHT node has routes: an announce/lookup issued against
   // an un-bootstrapped node completes instantly against an empty routing table,
@@ -541,4 +545,28 @@ export async function startDiscovery(opts: DiscoveryOptions): Promise<DiscoveryS
 /** Random 32-byte topic for tests/local experiments — never collides with a real league topic. */
 export function randomTopic(): Buffer {
   return randomBytes(32);
+}
+
+/**
+ * Parse a `VIBEDATE_BOOTSTRAP` value ("host:port,host:port") into DHT bootstrap
+ * nodes, or `undefined` when unset/empty (→ public DHT). Malformed entries are
+ * skipped; an all-bad list yields `undefined` so a typo never silently strands
+ * the node on an empty testnet.
+ */
+function parseBootstrapEnv(
+  raw: string | undefined,
+): ReadonlyArray<{ readonly host: string; readonly port: number }> | undefined {
+  if (raw === undefined || raw.trim() === '') return undefined;
+  const nodes: Array<{ host: string; port: number }> = [];
+  for (const entry of raw.split(',')) {
+    const trimmed = entry.trim();
+    if (trimmed === '') continue;
+    const idx = trimmed.lastIndexOf(':');
+    if (idx <= 0) continue;
+    const host = trimmed.slice(0, idx);
+    const port = Number(trimmed.slice(idx + 1));
+    if (!Number.isInteger(port) || port <= 0 || port > 65535) continue;
+    nodes.push({ host, port });
+  }
+  return nodes.length > 0 ? nodes : undefined;
 }
