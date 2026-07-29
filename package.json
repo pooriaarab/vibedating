@@ -1,6 +1,6 @@
 {
   "name": "vibedate",
-  "version": "0.8.5",
+  "version": "0.8.6",
   "description": "Dating by tokens — matched by usage league across agentic CLIs. Raw usage stays local; only your league is shared. CLI + local web app + MCP. Local-first.",
   "type": "module",
   "license": "MIT",
@@ -8,7 +8,7 @@
   "bin": {
     "vibedate": "./dist/cli.js",
     "vibedating": "./dist/cli.js",
-    "vibedate-mcp": "./dist/mcp.js"
+    "vibedate-mcp": "./dist/mcp-bin.js"
   },
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
@@ -22,11 +22,12 @@
     "dist"
   ],
   "scripts": {
-    "build": "tsup src/index.ts src/cli.ts src/mcp.ts --format esm --dts --clean",
+    "build": "tsup src/index.ts src/cli.ts src/mcp.ts src/mcp-bin.ts --format esm --dts --clean",
     "typecheck": "tsc --noEmit",
-    "test": "vitest run",
+    "test": "vitest run --exclude '**/*.harness.test.ts'",
     "test:watch": "vitest",
-    "bench": "tsx bench/run.ts"
+    "bench": "tsx bench/run.ts",
+    "test:harness": "npm run build && vitest run harness.test"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.0.0",
