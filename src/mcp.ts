@@ -4,6 +4,15 @@
  * An agent drives vibedate ENTIRELY via tool calls — no interactive terminal.
  * This is the fix for agents whose interactive `live` sessions time out.
  *
+ * Runnable two ways, both of which actually START the server:
+ *   - `vibedate mcp`  (cli.ts dispatches to runMcp)
+ *   - `vibedate-mcp`  (the dedicated bin src/mcp-bin.ts, which calls runMcp)
+ *
+ * This module is a LIBRARY (imported by both entrypoints); it never self-starts.
+ * A main-guard can't live here: tsup code-splits the multi-entry build into
+ * re-export barrels, so `import.meta.url` in this chunk never equals the bin the
+ * user ran. The dedicated bin file is the fix — see src/mcp-bin.ts.
+ *
  * Tools (every response is structured JSON with `{ ok, ... }` / `{ ok:false, error }`):
  *
  *   READ/STATE
@@ -27,6 +36,7 @@
  * AEGIS: peer text is UNTRUSTED display data — sanitized before return, never
  * executed, never fed to a shell.
  */
+import { createRequire } from 'node:module';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { z } from 'zod';
@@ -81,7 +91,19 @@ function jsonResult(value: unknown): { content: TextBlock[] } {
   return { content: [textBlock(JSON.stringify(value, null, 2))] };
 }
 
-const VERSION = '0.7.1';
+/**
+ * Server version — read from package.json at load, never hardcoded, so it can't
+ * drift from the published package the way the old literal did. Falls back to
+ * '0.0.0' only if package.json is somehow unreadable.
+ */
+const VERSION: string = (() => {
+  try {
+    const require = createRequire(import.meta.url);
+    return (require('../package.json') as { version?: string }).version ?? '0.0.0';
+  } catch {
+    return '0.0.0';
+  }
+})();
 
 /* -------------------------------------------------------------------------- */
 /* Shared helpers (mirror cli.ts scoping / hello / marks)                     */
@@ -969,3 +991,11 @@ export const MCP_TOOL_NAMES = [
   'room_leave',
   'media_send',
 ] as const;
+
+/**
+ * Bin entry: when this file is executed directly (`vibedate-mcp` / `node
+ * dist/mcp.js`), actually START the server. Guarded so importing `runMcp` from
+ * cli.ts (the `vibedate mcp` path) does NOT also launch it — only a direct
+ * invocation matches. Without this guard the bin loaded, defined, and exited,
+ * which an MCP client sees as a silent connect failure.
+ */

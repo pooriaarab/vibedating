@@ -47,9 +47,15 @@ export interface ProfileState {
   readonly connectedAt: string;
 }
 
-/** Default directory for vibedating's local state: `~/.vibedating`. */
+/**
+ * Default directory for vibedating's local state: `~/.vibedating`, or the path
+ * in `VIBEDATE_HOME` when set. The override gives each process its own state
+ * (identity key, handle, consent) — required to run several real peers on one
+ * machine (multi-process test harness).
+ */
 export function defaultStateDir(): string {
-  return path.join(os.homedir(), '.vibedating');
+  const home = process.env['VIBEDATE_HOME'];
+  return home && home.length > 0 ? home : path.join(os.homedir(), '.vibedating');
 }
 
 /** A file-backed {@link ConsentStore}; survives across CLI/server/MCP processes. */
