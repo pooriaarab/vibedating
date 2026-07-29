@@ -119,6 +119,8 @@ interface MemberEntry {
   readonly link: PeerLink;
 }
 
+export const MAX_ROOM = 32;
+
 /**
  * Join (or create) a named room on the DHT and discover ALL members. CONSENT
  * GATE LIVES WITH THE CALLER — never call this without the `share:live` grant
@@ -157,10 +159,26 @@ export async function startRoom(opts: RoomOptions): Promise<RoomSession> {
     ...(opts.stateDir === undefined ? {} : { stateDir: opts.stateDir }),
     ...(opts.notify === undefined ? {} : { notify: opts.notify }),
     onLink: (link) => {
+      const isSelf =
+        link.hello.pubkey !== undefined && opts.hello.pubkey !== undefined
+          ? link.hello.pubkey === opts.hello.pubkey
+          : link.hello.handle === opts.hello.handle;
+      if (isSelf) {
+        link.close();
+        return;
+      }
+
       const handle = link.hello.handle;
-      // A reconnect may supersede a stale entry for the same handle — replace
-      // and re-fire the roster either way (join or rejoin look the same to
-      // observers).
+
+      if (!entries.has(handle) && entries.size >= MAX_ROOM) {
+        link.send(`Room is full (${MAX_ROOM} members max). Try again later.`);
+        link.close();
+        return;
+      }
+
+      const cur = entries.get(handle);
+      if (cur) cur.link.close();
+
       entries.set(handle, { hello: link.hello, link });
       memberHellos.set(handle, link.hello);
       fireRoster();

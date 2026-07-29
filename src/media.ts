@@ -4,18 +4,22 @@
  * Two halves of one transfer:
  *
  *  - {@link sendMedia} / {@link sendMediaFile} — the SENDER. Reads bytes,
- *    emits a `media-start` frame, then one `media-chunk` frame per slice
- *    (base64) HONORING BACKPRESSURE (if `socket.write` returns false it awaits
- *    the `'drain'` event before the next chunk), then a `media-end` frame.
+ *    emits a `media-start` frame (newline-JSON), then one BINARY media-chunk
+ *    frame per slice (raw bytes, no base64) HONORING BACKPRESSURE (if
+ *    `socket.write` returns false it awaits the `'drain'` event before the next
+ *    chunk), then a `media-end` frame.
  *
  *  - {@link MediaReceiver} — the RECEIVER. Reassembles the chunks IN SEQ
  *    ORDER, rejecting a transfer if the running total exceeds the declared
  *    size (or the 25 MiB hard cap) or a duplicate / out-of-order seq arrives.
- *    On `media-end`, if every declared byte arrived, writes the file to a temp
- *    path and fires {@link MediaReceiver.onMedia} `{mime, name, path, size}`.
+ *    Accepts both binary-wire chunks (`data: Buffer`) and legacy JSON/base64
+ *    chunks (`b64: string`). On `media-end`, if every declared byte arrived,
+ *    writes the file to a temp path and fires {@link MediaReceiver.onMedia}
+ *    `{mime, name, path, size}`.
  *
- * Every frame goes through {@link parseFrame}'s allowlist — a peer can never
- * smuggle an extra (e.g. raw-usage) field onto a media frame.
+ * Every control frame goes through {@link parseFrame}'s allowlist — a peer can
+ * never smuggle an extra (e.g. raw-usage) field onto a media frame. Binary
+ * chunk headers are independently allowlisted (id + seq only).
  *
  * The PeerLink wires {@link PeerLink.onMedia} to a {@link MediaReceiver} and
  * {@link PeerLink.sendMedia} to {@link sendMediaFile}, so callers never touch
@@ -28,10 +32,11 @@ import os from 'node:os';
 import path from 'node:path';
 import type { Duplex } from 'node:stream';
 import {
-  MAX_B64_CHUNK_LEN,
+  MAX_BINARY_CHUNK_BYTES,
   MAX_MEDIA_SIZE,
   MAX_MIME_LEN,
   MAX_NAME_LEN,
+  serializeBinaryMediaChunk,
   serializeFrame,
   type MediaFrame,
 } from './frame.js';
@@ -41,11 +46,11 @@ import {
 /* -------------------------------------------------------------------------- */
 
 /**
- * Raw bytes that base64-encode into exactly `MAX_B64_CHUNK_LEN` chars
- * (16384 * 3 / 4 = 12288). Chunks are sliced at this granularity so every
- * emitted `media-chunk` frame is within the parse-time b64 cap.
+ * Raw bytes per binary media-chunk. 64 KiB is the binary payload cap
+ * ({@link MAX_BINARY_CHUNK_BYTES}); the old 12 KiB default existed only because
+ * base64 of 12 KiB raw filled the 16 KiB JSON b64 ceiling exactly.
  */
-export const DEFAULT_CHUNK_BYTES = Math.floor((MAX_B64_CHUNK_LEN * 3) / 4);
+export const DEFAULT_CHUNK_BYTES = MAX_BINARY_CHUNK_BYTES;
 
 /** Minimal extension → MIME map for sender-side inference. */
 const MIME_BY_EXT: Record<string, string> = {
@@ -63,16 +68,37 @@ function inferMime(name: string): string {
 }
 
 /**
- * Write one framed line, honoring backpressure. Resolves once the sink has
- * either accepted the write synchronously (returned true) or, when it returns
- * false, after the `'drain'` event fires — so a slow socket throttles the
- * sender instead of buffering unbounded chunks in memory.
+ * Write one buffer (or string) honoring backpressure. Resolves once the sink
+ * has either accepted the write synchronously (returned true) or, when it
+ * returns false, after the `'drain'` event fires — so a slow socket throttles
+ * the sender instead of buffering unbounded chunks in memory.
  */
-function writeFrame(socket: Duplex, line: string): Promise<void> {
-  return new Promise((resolve) => {
-    const ok = socket.write(line);
+function writeBytes(socket: Duplex, data: string | Buffer): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const ok = socket.write(data);
     if (ok) resolve();
-    else socket.once('drain', () => resolve());
+    else {
+      const onDrain = () => {
+        cleanup();
+        resolve();
+      };
+      const onClose = () => {
+        cleanup();
+        reject(new Error('Socket closed before drain'));
+      };
+      const onError = (err: Error) => {
+        cleanup();
+        reject(err);
+      };
+      const cleanup = () => {
+        socket.removeListener('drain', onDrain);
+        socket.removeListener('close', onClose);
+        socket.removeListener('error', onError);
+      };
+      socket.once('drain', onDrain);
+      socket.once('close', onClose);
+      socket.once('error', onError);
+    }
   });
 }
 
@@ -89,6 +115,11 @@ export interface SendMediaOptions {
   readonly id?: string;
   /** Raw bytes per chunk (defaults to {@link DEFAULT_CHUNK_BYTES}). */
   readonly chunkBytes?: number;
+  /**
+   * Force the legacy newline-JSON/base64 chunk path. Used by the bench OLD-vs-NEW
+   * comparison; production always uses the binary path.
+   */
+  readonly legacyJson?: boolean;
 }
 
 export interface SendResult {
@@ -100,6 +131,10 @@ export interface SendResult {
  * Send an in-memory buffer as a chunked media transfer. Throws if the data
  * exceeds the 25 MiB cap or the mime/name overshoot the protocol limits
  * (the receiver would drop such a transfer anyway).
+ *
+ * By default chunks are framed as binary media-chunks (raw bytes). Pass
+ * `legacyJson: true` to emit the old base64 newline-JSON chunks instead
+ * (bench comparison only).
  */
 export async function sendMedia(opts: SendMediaOptions): Promise<SendResult> {
   const { socket, data, mime, name } = opts;
@@ -111,17 +146,27 @@ export async function sendMedia(opts: SendMediaOptions): Promise<SendResult> {
   if (mime.length > MAX_MIME_LEN) throw new Error(`mime too long: ${mime.length} > ${MAX_MIME_LEN}`);
   if (name.length > MAX_NAME_LEN) throw new Error(`name too long: ${name.length} > ${MAX_NAME_LEN}`);
 
-  await writeFrame(socket, serializeFrame({ t: 'media-start', id, mime, size, name }) + '\n');
+  await writeBytes(socket, serializeFrame({ t: 'media-start', id, mime, size, name }) + '\n');
 
-  const chunkBytes = opts.chunkBytes ?? DEFAULT_CHUNK_BYTES;
+  const chunkBytes = Math.min(
+    opts.chunkBytes ?? DEFAULT_CHUNK_BYTES,
+    opts.legacyJson
+      ? Math.floor((16 * 1024 * 3) / 4) // legacy b64 cap → 12288 raw
+      : MAX_BINARY_CHUNK_BYTES,
+  );
   let seq = 0;
   for (let off = 0; off < size; off += chunkBytes) {
-    const b64 = data.subarray(off, off + chunkBytes).toString('base64');
-    await writeFrame(socket, serializeFrame({ t: 'media-chunk', id, seq, b64 }) + '\n');
+    const slice = data.subarray(off, off + chunkBytes);
+    if (opts.legacyJson) {
+      const b64 = slice.toString('base64');
+      await writeBytes(socket, serializeFrame({ t: 'media-chunk', id, seq, b64 }) + '\n');
+    } else {
+      await writeBytes(socket, serializeBinaryMediaChunk({ id, seq, data: slice }));
+    }
     seq++;
   }
 
-  await writeFrame(socket, serializeFrame({ t: 'media-end', id }) + '\n');
+  await writeBytes(socket, serializeFrame({ t: 'media-end', id }) + '\n');
   return { id, size };
 }
 
@@ -135,6 +180,7 @@ export interface SendMediaFileOptions {
   readonly name?: string;
   readonly id?: string;
   readonly chunkBytes?: number;
+  readonly legacyJson?: boolean;
 }
 
 /** Read a file from disk and send it via {@link sendMedia}. */
@@ -149,6 +195,7 @@ export async function sendMediaFile(opts: SendMediaFileOptions): Promise<SendRes
     name,
     id: opts.id,
     chunkBytes: opts.chunkBytes,
+    legacyJson: opts.legacyJson,
   });
 }
 
@@ -162,6 +209,7 @@ export interface ReceivedMedia {
   /** Temp file path holding the reassembled bytes. */
   readonly path: string;
   readonly size: number;
+  readonly error?: Error;
 }
 
 interface Transfer {
@@ -232,9 +280,22 @@ export class MediaReceiver {
           return;
         }
         let bytes: Buffer;
-        try {
-          bytes = Buffer.from(frame.b64, 'base64');
-        } catch {
+        if ('data' in frame && Buffer.isBuffer(frame.data)) {
+          // Binary wire path — payload already raw.
+          bytes = frame.data;
+          if (bytes.length === 0 || bytes.length > MAX_BINARY_CHUNK_BYTES) {
+            this.abort(frame.id);
+            return;
+          }
+        } else if ('b64' in frame && typeof frame.b64 === 'string') {
+          // Legacy JSON/base64 path (still accepted for interoperability).
+          try {
+            bytes = Buffer.from(frame.b64, 'base64');
+          } catch {
+            this.abort(frame.id);
+            return;
+          }
+        } else {
           this.abort(frame.id);
           return;
         }
@@ -259,8 +320,10 @@ export class MediaReceiver {
         const filePath = path.join(this.opts.tmpDir ?? os.tmpdir(), safeName(frame.id, tx.name));
         try {
           writeFileSync(filePath, buf);
-        } catch {
-          return; // disk full / bad path — best effort, never throw
+        } catch (err) {
+          const error = err instanceof Error ? err : new Error(String(err));
+          this.onMedia({ mime: tx.mime, name: tx.name, path: filePath, size: tx.received, error });
+          return;
         }
         this.onMedia({ mime: tx.mime, name: tx.name, path: filePath, size: tx.received });
         return;

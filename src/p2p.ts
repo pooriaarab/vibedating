@@ -392,18 +392,19 @@ export async function startDiscovery(opts: DiscoveryOptions): Promise<DiscoveryS
       }) + '\n',
     );
 
-    // The hello handshake: buffer until the first line, parse it as a frame,
+    // The hello handshake: buffer until the first newline-JSON hello, parse it,
     // enforce the league allowlist + the parseFrame field allowlist, then hand
-    // the socket to a PeerLink for all subsequent frames.
-    let buf = '';
+    // the socket (and any leftover BYTES — which may already contain binary
+    // media-chunks) to a PeerLink for all subsequent frames.
+    let buf = Buffer.alloc(0);
     let handedOff = false;
     const onData = (chunk: Buffer): void => {
       if (handedOff) return; // PeerLink owns the socket now
-      buf += chunk.toString('utf8');
+      buf = buf.length === 0 ? Buffer.from(chunk) : Buffer.concat([buf, chunk]);
       let nl: number;
-      while ((nl = buf.indexOf('\n')) >= 0) {
-        const line = buf.slice(0, nl);
-        buf = buf.slice(nl + 1);
+      while ((nl = buf.indexOf(0x0a /* \n */)) >= 0) {
+        const line = buf.subarray(0, nl).toString('utf8');
+        buf = buf.subarray(nl + 1);
         if (line.trim() === '') continue;
         const frame = parseFrame(line);
         if (frame === null) continue; // malformed/unknown — drop, never crash
@@ -481,7 +482,7 @@ export async function startDiscovery(opts: DiscoveryOptions): Promise<DiscoveryS
           });
           onLink(link);
         }
-        buf = '';
+        buf = Buffer.alloc(0);
         return;
       }
     };
