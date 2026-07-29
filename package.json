@@ -1,7 +1,7 @@
 {
   "name": "vibedate",
-  "version": "0.8.7",
-  "description": "Dating by tokens — matched by usage league across agentic CLIs. Raw usage stays local; only your league is shared. CLI + local web app + MCP. Local-first.",
+  "version": "0.8.8",
+  "description": "Dating by tokens \u2014 matched by usage league across agentic CLIs. Raw usage stays local; only your league is shared. CLI + local web app + MCP. Local-first.",
   "type": "module",
   "license": "MIT",
   "author": "Pooria Arab",
@@ -68,5 +68,6 @@
   },
   "engines": {
     "node": ">=18"
-  }
+  },
+  "mcpName": "io.github.pooriaarab/vibedate"
 }
