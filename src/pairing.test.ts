@@ -15,8 +15,10 @@ interface FakeLink extends PeerLink {
 function fakeLink(handle: string): FakeLink {
   let closeCb: (() => void) | undefined;
   let msgCb: ((m: { id: string; text: string; at: number }) => void) | undefined;
+  let isClosed = false;
   return {
     hello: { handle, league: '10M', harness: 'fake' },
+    get closed() { return isClosed; },
     send: vi.fn(),
     sendMedia: vi.fn().mockResolvedValue({ id: '', size: 0 }),
     sendSignal: vi.fn(),
@@ -28,8 +30,8 @@ function fakeLink(handle: string): FakeLink {
     onClose: (cb: () => void) => {
       closeCb = cb;
     },
-    close: vi.fn(),
-    fireRemoteClose: () => closeCb?.(),
+    close: vi.fn(() => { isClosed = true; }),
+    fireRemoteClose: () => { isClosed = true; closeCb?.(); },
     fireMessage: (text: string) => msgCb?.({ id: text, text, at: 1 }),
   };
 }
@@ -104,6 +106,36 @@ describe('LivePairing — omegle auto-pair + next', () => {
 
     expect(pairing.current()).toBe(b);
     expect(onMatch).toHaveBeenCalledWith(b);
+  });
+
+  it('caps queue at MAX_QUEUE and drops oldest', () => {
+    const pairing = createPairing();
+    const links = Array.from({ length: 102 }, (_, i) => fakeLink(`@peer${i}`));
+    for (const l of links) pairing.add(l);
+    
+    // First link is current
+    expect(pairing.current()?.hello.handle).toBe('@peer0');
+    // Queue should have 100 links (101 added, 1 dropped)
+    expect(pairing.available).toBe(100);
+    expect(links[1]!.close).toHaveBeenCalledTimes(1); // @peer1 dropped
+    expect(links[2]!.close).not.toHaveBeenCalled();
+  });
+
+  it('next() skips a closed link in the queue', () => {
+    const pairing = createPairing();
+    const a = fakeLink('@alice');
+    const b = fakeLink('@bob');
+    const c = fakeLink('@carol');
+    
+    pairing.add(a); // current
+    pairing.add(b); // queued
+    pairing.add(c); // queued
+    
+    // Mark b as closed remotely without triggering onClose just to test next() logic
+    Object.defineProperty(b, 'closed', { get: () => true });
+    
+    pairing.next(); // Should skip b and select c
+    expect(pairing.current()).toBe(c);
   });
 });
 
