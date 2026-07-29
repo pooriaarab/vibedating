@@ -18,13 +18,13 @@
  * The {@link LIVE_NOTICE} line is what the CLI prints before joining.
  */
 import { createHash, randomBytes } from 'node:crypto';
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
-import path from 'node:path';
 import type { Harness, VibeEvent } from '@pooriaarab/vibe-core';
 import { makeEvent, notify as vibeCoreNotify } from '@pooriaarab/vibe-core';
 import { parseFrame, serializeFrame } from './frame.js';
+import { LIVE_NOTICE, parseHandshake, serializeHandshake, type PeerHello } from './handshake.js';
 import { classifyHelloIdentity } from './identity.js';
 import { createPeerLink, type PeerLink } from './link.js';
+import { loadPeers, recordPeer, recordPeerMessage, type StoredPeer } from './peerstore.js';
 import { defaultStateDir } from './state.js';
 import { sanitizePeerText } from './untrusted.js';
 
@@ -45,231 +45,20 @@ export function leagueTopic(leagueName: string): Buffer {
 }
 
 /* -------------------------------------------------------------------------- */
-/* Handshake                                                                  */
+/* Re-exports                                                                 */
 /* -------------------------------------------------------------------------- */
+/* The handshake wire form and the local peer store each live in their own     */
+/* module now (handshake.ts, peerstore.ts). They're re-exported here so the     */
+/* many existing `from './p2p.js'` imports keep working while this file stays   */
+/* focused on discovery.                                                        */
 
-/**
- * The fields that ever leave the machine over a peer connection: handle, league,
- * harness, and (optionally) the self-asserted usage-verification flag plus the
- * identity proof (pubkey/nonce/sig). NEVER raw usage — no token totals, no logs.
- * `verified`/`pubkey` are undefined for legacy peers that predate them; both
- * `undefined` and `false` display as unverified (~).
- */
-export interface PeerHello {
-  readonly handle: string;
-  readonly league: string;
-  readonly harness: string;
-  /**
-   * Self-asserted: the sender's usage came from real local logs (see readUsage).
-   * Bound to the sender's key by the identity signature when `pubkey` is present.
-   */
-  readonly verified?: boolean;
-  /** Raw ed25519 public key (64 hex) — the persistent identity this hello signs. */
-  readonly pubkey?: string;
-  /** Random per-hello nonce (hex) covered by the signature. */
-  readonly nonce?: string;
-  /** ed25519 signature (128 hex) over `handle|league|harness|verified|nonce`. */
-  readonly sig?: string;
-  /**
-   * LOCAL-DERIVED, never on the wire: true when this hello's signature verified
-   * against its pubkey (see classifyHelloIdentity). Marked 🔑 in the UI.
-   */
-  readonly identityVerified?: boolean;
-}
-
-/** One-line privacy notice printed before joining the swarm. */
-export const LIVE_NOTICE =
-  'live discovery: sharing only your handle + league + harness + verified flag + identity pubkey (never raw usage) with same-league peers on the public DHT';
-
-/* Defensive caps so a malicious or buggy peer can't make us retain junk. */
-const MAX_HANDLE_LEN = 64;
-const MAX_LEAGUE_LEN = 32;
-const MAX_HARNESS_LEN = 64;
-const MAX_HANDSHAKE_LEN = 4096;
+export { LIVE_NOTICE, serializeHandshake, parseHandshake };
+export type { PeerHello };
+export { loadPeers, recordPeer, recordPeerMessage };
+export type { StoredPeer };
 
 /** How often a discovery session re-runs an announce/lookup round. */
 const REFRESH_INTERVAL_MS = 5_000;
-
-/**
- * Serialize a hello to the single JSON line sent on connect. Built key-by-key
- * from the allowlist — even if a caller sneaks extra properties onto the
- * object, they cannot leak into the wire format.
- */
-export function serializeHandshake(hello: PeerHello): string {
-  return JSON.stringify({
-    handle: hello.handle,
-    league: hello.league,
-    harness: hello.harness,
-    ...(hello.verified !== undefined ? { verified: hello.verified } : {}),
-    ...(hello.pubkey !== undefined ? { pubkey: hello.pubkey } : {}),
-    ...(hello.nonce !== undefined ? { nonce: hello.nonce } : {}),
-    ...(hello.sig !== undefined ? { sig: hello.sig } : {}),
-    // identityVerified is LOCAL-derived and deliberately never serialized.
-  });
-}
-
-/**
- * Parse one incoming handshake line. Returns `null` for anything malformed
- * (bad JSON, non-object, missing/oversized handle or league). The result is
- * constructed from an allowlist of keys, so any extra fields a peer sends —
- * in particular any raw-usage field — are ignored and never retained.
- */
-export function parseHandshake(raw: string | Buffer): PeerHello | null {
-  const text = typeof raw === 'string' ? raw : raw.toString('utf8');
-  if (text.length > MAX_HANDSHAKE_LEN) return null;
-  let data: unknown;
-  try {
-    data = JSON.parse(text);
-  } catch {
-    return null;
-  }
-  if (typeof data !== 'object' || data === null || Array.isArray(data)) return null;
-  const rec = data as Record<string, unknown>;
-  const handle = rec['handle'];
-  const league = rec['league'];
-  if (typeof handle !== 'string' || handle.length === 0 || handle.length > MAX_HANDLE_LEN) {
-    return null;
-  }
-  if (typeof league !== 'string' || league.length === 0 || league.length > MAX_LEAGUE_LEN) {
-    return null;
-  }
-  const harness = rec['harness'];
-  const verified = rec['verified'];
-  if (verified !== undefined && typeof verified !== 'boolean') return null;
-  // Identity proof: optional (legacy peers), but exactly-shaped hex when present
-  // — same discipline as the hello frame. Verification happens one layer up.
-  const pubkey = rec['pubkey'];
-  if (pubkey !== undefined && (typeof pubkey !== 'string' || !/^[0-9a-fA-F]{64}$/.test(pubkey))) {
-    return null;
-  }
-  const nonce = rec['nonce'];
-  if (nonce !== undefined && (typeof nonce !== 'string' || !/^[0-9a-fA-F]{1,64}$/.test(nonce))) {
-    return null;
-  }
-  const sig = rec['sig'];
-  if (sig !== undefined && (typeof sig !== 'string' || !/^[0-9a-fA-F]{128}$/.test(sig))) {
-    return null;
-  }
-  return {
-    handle,
-    league,
-    harness:
-      typeof harness === 'string' && harness.length > 0 && harness.length <= MAX_HARNESS_LEN
-        ? harness
-        : 'unknown',
-    ...(typeof verified === 'boolean' ? { verified } : {}),
-    ...(typeof pubkey === 'string' ? { pubkey } : {}),
-    ...(typeof nonce === 'string' ? { nonce } : {}),
-    ...(typeof sig === 'string' ? { sig } : {}),
-  };
-}
-
-/* -------------------------------------------------------------------------- */
-/* Peer persistence (~/.vibedating/peers.json)                                 */
-/* -------------------------------------------------------------------------- */
-
-/** A peer we've shaken hands with, persisted locally. */
-export interface StoredPeer extends PeerHello {
-  readonly firstSeenAt: string;
-  readonly lastSeenAt: string;
-  /** LOCAL metadata: when the last `msg` from this peer arrived (never on the wire). */
-  readonly lastMessageAt?: string;
-}
-
-function peersPath(dir: string): string {
-  return path.join(dir, 'peers.json');
-}
-
-/** Load persisted live peers, or `[]` if none/corrupt. Local-only data. */
-export function loadPeers(dir: string = defaultStateDir(), maxAgeMs: number = 7 * 24 * 60 * 60 * 1000): StoredPeer[] {
-  try {
-    const raw = readFileSync(peersPath(dir), 'utf8');
-    const data = JSON.parse(raw) as { peers?: StoredPeer[] };
-    if (!Array.isArray(data.peers)) return [];
-    const now = Date.now();
-    return data.peers.filter((p) => now - new Date(p.lastSeenAt).getTime() <= maxAgeMs);
-  } catch {
-    return [];
-  }
-}
-
-/**
- * Record a successfully handshaken peer, keyed by pubkey (if verified) or handle (legacy).
- * Returns whether this peer is NEW (first time seen).
- */
-export function recordPeer(
-  hello: PeerHello,
-  dir: string = defaultStateDir(),
-  now: Date = new Date(),
-): { peer: StoredPeer; isNew: boolean } {
-  const peers = loadPeers(dir);
-  const at = now.toISOString();
-  // Built key-by-key from the allowlist — nothing beyond the PeerHello fields is
-  // ever persisted, regardless of what the caller's object carries. Optional
-  // fields are taken ONLY from this hello, so a stale value from an earlier
-  // sighting can never linger after a peer stops sending it.
-  const clean: PeerHello = {
-    handle: hello.handle,
-    league: hello.league,
-    harness: hello.harness,
-    ...(hello.verified !== undefined ? { verified: hello.verified } : {}),
-    ...(hello.pubkey !== undefined ? { pubkey: hello.pubkey } : {}),
-    ...(hello.identityVerified !== undefined ? { identityVerified: hello.identityVerified } : {}),
-  };
-  const existing = peers.findIndex((p) =>
-    clean.pubkey !== undefined && p.pubkey !== undefined
-      ? p.pubkey === clean.pubkey
-      : p.handle === clean.handle
-  );
-  let isNew: boolean;
-  let peer: StoredPeer;
-  if (existing >= 0) {
-    isNew = false;
-    const prev = peers[existing]!;
-    peer = {
-      ...clean,
-      firstSeenAt: prev.firstSeenAt,
-      lastSeenAt: at,
-      // lastMessageAt is local metadata — carried over, never reset by a hello.
-      ...(prev.lastMessageAt !== undefined ? { lastMessageAt: prev.lastMessageAt } : {}),
-    };
-    peers[existing] = peer;
-  } else {
-    isNew = true;
-    peer = { ...clean, firstSeenAt: at, lastSeenAt: at };
-    peers.push(peer);
-  }
-  mkdirSync(dir, { recursive: true });
-  writeFileSync(peersPath(dir), JSON.stringify({ peers }, null, 2) + '\n', 'utf8');
-  return { peer, isNew };
-}
-
-/**
- * Stamp `lastMessageAt` on a stored peer (a `msg` just arrived from them).
- * Local metadata only; never on the wire. Returns false when the handle isn't
- * a known peer. Never throws — best-effort bookkeeping.
- */
-export function recordPeerMessage(
-  peer: PeerHello,
-  dir: string = defaultStateDir(),
-  now: Date = new Date(),
-): boolean {
-  try {
-    const peers = loadPeers(dir);
-    const idx = peers.findIndex((p) =>
-      peer.pubkey !== undefined && p.pubkey !== undefined
-        ? p.pubkey === peer.pubkey
-        : p.handle === peer.handle
-    );
-    if (idx < 0) return false;
-    peers[idx] = { ...peers[idx]!, lastMessageAt: now.toISOString() };
-    mkdirSync(dir, { recursive: true });
-    writeFileSync(peersPath(dir), JSON.stringify({ peers }, null, 2) + '\n', 'utf8');
-    return true;
-  } catch {
-    return false;
-  }
-}
 
 /* -------------------------------------------------------------------------- */
 /* Discovery session                                                          */
