@@ -41,6 +41,8 @@ export interface CreatePeerLinkOptions {
 export interface PeerLink {
   /** The validated identity of the remote peer (from the hello handshake). */
   readonly hello: PeerHello;
+  /** Whether the link has been closed. */
+  readonly closed: boolean;
   /** Send a line of text as a `msg` frame. */
   send(text: string): void;
   /** Read a file from disk and send it as a chunked media transfer. */
@@ -172,6 +174,7 @@ export function createPeerLink(
 
   return {
     hello,
+    get closed() { return closed; },
     send(text) {
       if (closed) return;
       const frame: Frame = { t: 'msg', id: randomUUID(), text, at: Date.now() };

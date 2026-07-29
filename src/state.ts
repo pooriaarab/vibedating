@@ -9,12 +9,19 @@
  * (scope {@link CONSENT_SCOPE}); it is granted on `connect` and revocable on
  * reset. Backed by a tiny JSON file next to the profile so it survives restarts.
  */
-import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, rmSync, renameSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { createConsentLedger } from '@pooriaarab/vibe-core';
 import type { ConsentGrant, ConsentLedger, ConsentStore, UsageSnapshot } from '@pooriaarab/vibe-core';
 import { league } from './index.js';
+
+/** Atomically write a JSON object to a file to prevent partial reads by concurrent processes. */
+function writeJsonAtomic(filePath: string, obj: unknown): void {
+  const tmpPath = `${filePath}.tmp`;
+  writeFileSync(tmpPath, JSON.stringify(obj, null, 2) + '\n', 'utf8');
+  renameSync(tmpPath, filePath);
+}
 
 /** Consent scope covering "share my league bucket". Raw usage is never in scope. */
 export const CONSENT_SCOPE = 'share:league';
@@ -61,7 +68,7 @@ class FileConsentStore implements ConsentStore {
 
   save(grants: ConsentGrant[]): void {
     mkdirSync(path.dirname(this.file), { recursive: true });
-    writeFileSync(this.file, JSON.stringify({ grants }, null, 2) + '\n', 'utf8');
+    writeJsonAtomic(this.file, { grants });
   }
 }
 
@@ -96,7 +103,7 @@ export function connectProfile(
     connectedAt: new Date().toISOString(),
   };
   mkdirSync(dir, { recursive: true });
-  writeFileSync(profilePath(dir), JSON.stringify(state, null, 2) + '\n', 'utf8');
+  writeJsonAtomic(profilePath(dir), state);
   return state;
 }
 
@@ -215,15 +222,11 @@ export function saveHandle(handle: string, dir: string = defaultStateDir()): str
     );
   }
   mkdirSync(dir, { recursive: true });
-  writeFileSync(handleFilePath(dir), JSON.stringify({ handle: canonical }, null, 2) + '\n', 'utf8');
+  writeJsonAtomic(handleFilePath(dir), { handle: canonical });
   // Mirror onto an existing profile so live commands see the new handle at once.
   const existing = loadProfile(dir);
   if (existing !== null) {
-    writeFileSync(
-      profilePath(dir),
-      JSON.stringify({ ...existing, handle: canonical }, null, 2) + '\n',
-      'utf8',
-    );
+    writeJsonAtomic(profilePath(dir), { ...existing, handle: canonical });
   }
   return canonical;
 }
@@ -256,7 +259,7 @@ function blocklistPath(dir: string): string {
 
 function persistBlocklist(blocked: readonly string[], dir: string): void {
   mkdirSync(dir, { recursive: true });
-  writeFileSync(blocklistPath(dir), JSON.stringify({ blocked }, null, 2) + '\n', 'utf8');
+  writeJsonAtomic(blocklistPath(dir), { blocked });
 }
 
 /** Load the persisted blocklist (canonical '@'-prefixed handles), or `[]`. */
