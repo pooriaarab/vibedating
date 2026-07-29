@@ -15,6 +15,7 @@ import type { Duplex } from 'node:stream';
 import { DEFAULT_CHUNK_BYTES, sendMedia } from '../src/media.js';
 import type { PeerLink } from '../src/link.js';
 import type { RtcFrame } from '../src/frame.js';
+import { MAX_BINARY_CHUNK_BYTES, pullFramesFromBuffer } from '../src/frame.js';
 import {
   createLocalTestnet,
   hello,
@@ -42,10 +43,14 @@ const N_BOOT = 5; // DHT bootstrap
 const MEDIA_1MB = 1 * 1024 * 1024;
 const MEDIA_10MB = 10 * 1024 * 1024;
 
+/** Legacy base64 path used DEFAULT_CHUNK_BYTES ≈ 12 KiB (filling the 16 KiB b64 cap). */
+const LEGACY_CHUNK_BYTES = Math.floor((16 * 1024 * 3) / 4); // 12288
+
 const CHUNK_VARIANTS = [
-  { label: '4 KiB raw', bytes: 4 * 1024 },
-  { label: 'default (12 KiB raw / 16 KiB b64)', bytes: DEFAULT_CHUNK_BYTES },
-  { label: '32 KiB raw (clamped by frame b64)', bytes: 32 * 1024 },
+  { label: '4 KiB raw (binary)', bytes: 4 * 1024, legacyJson: false },
+  { label: 'legacy JSON/b64 @ 12 KiB raw', bytes: LEGACY_CHUNK_BYTES, legacyJson: true },
+  { label: `binary default (${DEFAULT_CHUNK_BYTES} B = 64 KiB)`, bytes: DEFAULT_CHUNK_BYTES, legacyJson: false },
+  { label: 'binary 32 KiB raw', bytes: 32 * 1024, legacyJson: false },
 ] as const;
 
 /* -------------------------------------------------------------------------- */
@@ -336,30 +341,142 @@ async function tcpLinkedSockets(): Promise<{
   };
 }
 
-async function benchMedia(bootstrap: Bootstrap, dirs: TempDirs): Promise<void> {
-  log('\n=== 4. Media throughput (1MB + 10MB + chunk size) ===');
+/** Build a non-compressible deterministic payload of `size` bytes. */
+function fillPayload(size: number, seed = 0xdecafbad): Buffer {
+  const payload = Buffer.alloc(size, 0xab);
+  let state = seed >>> 0;
+  for (let i = 0; i < payload.length; i += 64) {
+    state = (Math.imul(state, 1664525) + 1013904223) >>> 0;
+    payload[i] = state & 0xff;
+  }
+  return payload;
+}
 
-  // --- End-to-end via PeerLink.sendMedia (production path) ---
+/**
+ * Localhost-TCP media throughput isolate: send via sendMedia, receive via
+ * pullFramesFromBuffer + MediaReceiver. Compares OLD (legacy JSON/b64) vs NEW
+ * (binary wire). Keeps hyperswarm/Noise out of the comparison so the framing
+ * overhead is what we measure.
+ */
+async function benchTcpMediaVariant(opts: {
+  size: number;
+  chunkBytes: number;
+  legacyJson: boolean;
+  iterations: number;
+  dirs: TempDirs;
+  label: string;
+}): Promise<{ times: number[]; throughputs: number[] }> {
+  const { size, chunkBytes, legacyJson, iterations, dirs, label } = opts;
+  const times: number[] = [];
+  const throughputs: number[] = [];
+  const { MediaReceiver } = await import('../src/media.js');
+
+  for (let i = 0; i < iterations; i++) {
+    let pair: Awaited<ReturnType<typeof tcpLinkedSockets>> | undefined;
+    try {
+      pair = await tcpLinkedSockets();
+      let received = false;
+      let buf = Buffer.alloc(0);
+      const rx = new MediaReceiver(
+        () => {
+          received = true;
+        },
+        { tmpDir: dirs.tmp() },
+      );
+      pair.socketB.on('data', (chunk: Buffer) => {
+        buf = buf.length === 0 ? Buffer.from(chunk) : Buffer.concat([buf, chunk]);
+        const { frames, rest } = pullFramesFromBuffer(buf);
+        buf = rest;
+        for (const f of frames) {
+          if (f.t === 'media-start' || f.t === 'media-chunk' || f.t === 'media-end') {
+            rx.handle(f);
+          }
+        }
+      });
+
+      const data = fillPayload(size, 0xcd000000 ^ i);
+      const t0 = nowMs();
+      await sendMedia({
+        socket: pair.socketA,
+        data,
+        mime: 'application/octet-stream',
+        name: `${label}.bin`,
+        chunkBytes,
+        legacyJson,
+      });
+      const ok = await waitFor(() => received, 60_000, 2);
+      const dt = nowMs() - t0;
+      if (!ok) {
+        log(`  ! ${label} iteration ${i} timed out`);
+        continue;
+      }
+      times.push(dt);
+      throughputs.push(size / (1024 * 1024) / (dt / 1000));
+    } catch (err) {
+      log(`  ! ${label} iteration ${i} error: ${(err as Error).message}`);
+    } finally {
+      if (pair) await pair.close().catch(() => {});
+    }
+  }
+  return { times, throughputs };
+}
+
+async function benchMedia(bootstrap: Bootstrap, dirs: TempDirs): Promise<void> {
+  log('\n=== 4. Media throughput — OLD (JSON/b64) vs NEW (binary wire) ===');
+
+  // --- OLD vs NEW head-to-head on localhost TCP (framing isolate) ---
+  // This is the cleanest apples-to-apples view of the base64+JSON tax.
+  for (const size of [MEDIA_1MB, MEDIA_10MB]) {
+    const sizeLabel = size >= MEDIA_10MB ? '10MB' : '1MB';
+    const iterations = size >= MEDIA_10MB ? Math.max(3, N_SLOW - 2) : N_SLOW;
+
+    // OLD: legacy newline-JSON + base64 @ 12 KiB raw (the pre-change default).
+    {
+      const label = `OLD JSON/b64 ${sizeLabel}`;
+      log(`  · ${label} (chunk=${LEGACY_CHUNK_BYTES} raw, base64 on wire)`);
+      const { times, throughputs } = await benchTcpMediaVariant({
+        size,
+        chunkBytes: LEGACY_CHUNK_BYTES,
+        legacyJson: true,
+        iterations,
+        dirs,
+        label,
+      });
+      record(`Media ${sizeLabel} OLD (JSON/b64) time`, times, 'ms', `chunk=${LEGACY_CHUNK_BYTES} localhost TCP`);
+      record(`Media ${sizeLabel} OLD (JSON/b64) throughput`, throughputs, 'MBps', 'localhost TCP');
+    }
+
+    // NEW: binary wire @ 64 KiB raw (production default).
+    {
+      const label = `NEW binary ${sizeLabel}`;
+      log(`  · ${label} (chunk=${DEFAULT_CHUNK_BYTES} raw, binary on wire)`);
+      const { times, throughputs } = await benchTcpMediaVariant({
+        size,
+        chunkBytes: DEFAULT_CHUNK_BYTES,
+        legacyJson: false,
+        iterations,
+        dirs,
+        label,
+      });
+      record(`Media ${sizeLabel} NEW (binary) time`, times, 'ms', `chunk=${DEFAULT_CHUNK_BYTES} localhost TCP`);
+      record(`Media ${sizeLabel} NEW (binary) throughput`, throughputs, 'MBps', 'localhost TCP');
+    }
+  }
+
+  // --- End-to-end via PeerLink.sendMedia (production path, always binary) ---
+  log('  · PeerLink e2e (production binary path over hyperswarm testnet)');
   for (const size of [MEDIA_1MB, MEDIA_10MB]) {
     const label = size >= MEDIA_10MB ? '10MB' : '1MB';
     const times: number[] = [];
     const throughputs: number[] = [];
     const iterations = size >= MEDIA_10MB ? Math.max(3, N_SLOW - 2) : N_SLOW;
 
-    // One linked pair, reused across iterations (isolates transfer from discovery).
     const pair = await establishLinkedPair(bootstrap, dirs, `media${label}`);
     try {
-      const payload = Buffer.alloc(size, 0xab);
-      // Deterministic LCG fill so it isn't all-zeroes (compress-that).
-      let state = 0xdecafbad >>> 0;
-      for (let i = 0; i < payload.length; i += 64) {
-        state = (Math.imul(state, 1664525) + 1013904223) >>> 0;
-        payload[i] = state & 0xff;
-      }
+      const payload = fillPayload(size);
       const filePath = path.join(dirs.tmp(), `${label}.bin`);
       writeFileSync(filePath, payload);
 
-      // Single onMedia handler; each iteration waits for the next delivery.
       let pending: ((m: { size: number; path: string }) => void) | undefined;
       pair.linkB.onMedia((m) => {
         pending?.(m);
@@ -382,7 +499,7 @@ async function benchMedia(bootstrap: Bootstrap, dirs: TempDirs): Promise<void> {
         const dt = nowMs() - t0;
         pending = undefined;
         if (!got || got.size !== sent.size) {
-          log(`  ! ${label} iteration ${i} timed out or size mismatch`);
+          log(`  ! PeerLink ${label} iteration ${i} timed out or size mismatch`);
           continue;
         }
         times.push(dt);
@@ -397,78 +514,32 @@ async function benchMedia(bootstrap: Bootstrap, dirs: TempDirs): Promise<void> {
       await pair.close();
     }
 
-    record(`Media ${label} transfer time (PeerLink)`, times, 'ms', `DEFAULT_CHUNK_BYTES=${DEFAULT_CHUNK_BYTES}`);
-    record(`Media ${label} throughput`, throughputs, 'MBps');
+    record(
+      `Media ${label} transfer time (PeerLink binary)`,
+      times,
+      'ms',
+      `DEFAULT_CHUNK_BYTES=${DEFAULT_CHUNK_BYTES}`,
+    );
+    record(`Media ${label} throughput (PeerLink binary)`, throughputs, 'MBps');
   }
 
-  // --- Chunk-size effect on 1MB via localhost TCP + sendMedia (isolates
-  // framing/backpressure from DHT). Production e2e numbers are the PeerLink
-  // rows above.
-  log('  · chunk-size sweep on 1MB (localhost TCP + sendMedia backpressure path)');
+  // --- Extra chunk-size sweep on 1MB (binary variants) ---
+  log('  · chunk-size sweep on 1MB (localhost TCP)');
   for (const variant of CHUNK_VARIANTS) {
-    // Frame parser rejects b64 > 16 KiB. Cap raw bytes to DEFAULT_CHUNK_BYTES
-    // when the requested size would base64 past the cap.
-    const maxRaw = DEFAULT_CHUNK_BYTES;
+    const maxRaw = variant.legacyJson ? LEGACY_CHUNK_BYTES : MAX_BINARY_CHUNK_BYTES;
     const chunkBytes = Math.min(variant.bytes, maxRaw);
     const effectiveLabel =
-      variant.bytes > maxRaw
-        ? `${variant.label} → clamped to ${chunkBytes} B`
-        : variant.label;
+      variant.bytes > maxRaw ? `${variant.label} → clamped to ${chunkBytes} B` : variant.label;
 
-    const times: number[] = [];
-    const throughputs: number[] = [];
-    for (let i = 0; i < N_SLOW; i++) {
-      let pair: Awaited<ReturnType<typeof tcpLinkedSockets>> | undefined;
-      try {
-        pair = await tcpLinkedSockets();
-        const { MediaReceiver } = await import('../src/media.js');
-        const { parseFrame } = await import('../src/frame.js');
-        let received = false;
-        let buf = '';
-        const rx = new MediaReceiver(
-          () => {
-            received = true;
-          },
-          { tmpDir: dirs.tmp() },
-        );
-        pair.socketB.on('data', (chunk: Buffer) => {
-          buf += chunk.toString('utf8');
-          let nl: number;
-          while ((nl = buf.indexOf('\n')) >= 0) {
-            const line = buf.slice(0, nl);
-            buf = buf.slice(nl + 1);
-            if (!line.trim()) continue;
-            const f = parseFrame(line);
-            if (f && (f.t === 'media-start' || f.t === 'media-chunk' || f.t === 'media-end')) {
-              rx.handle(f);
-            }
-          }
-        });
-
-        const data = Buffer.alloc(MEDIA_1MB, 0xcd);
-        const t0 = nowMs();
-        await sendMedia({
-          socket: pair.socketA,
-          data,
-          mime: 'application/octet-stream',
-          name: 'chunk-sweep.bin',
-          chunkBytes,
-        });
-        const ok = await waitFor(() => received, 30_000, 2);
-        const dt = nowMs() - t0;
-        if (!ok) {
-          log(`  ! chunk ${effectiveLabel} iteration ${i} timed out`);
-          continue;
-        }
-        times.push(dt);
-        throughputs.push(1 / (dt / 1000));
-      } catch (err) {
-        log(`  ! chunk ${effectiveLabel} iteration ${i} error: ${(err as Error).message}`);
-      } finally {
-        if (pair) await pair.close().catch(() => {});
-      }
-    }
-    record(`Media 1MB time @ chunk ${effectiveLabel}`, times, 'ms', 'localhost TCP (chunk/backpressure isolate)');
+    const { times, throughputs } = await benchTcpMediaVariant({
+      size: MEDIA_1MB,
+      chunkBytes,
+      legacyJson: variant.legacyJson,
+      iterations: N_SLOW,
+      dirs,
+      label: effectiveLabel,
+    });
+    record(`Media 1MB time @ chunk ${effectiveLabel}`, times, 'ms', 'localhost TCP');
     record(`Media 1MB throughput @ chunk ${effectiveLabel}`, throughputs, 'MBps', 'localhost TCP');
   }
 }
@@ -674,10 +745,12 @@ function buildReport(startedAt: Date, elapsedSec: number): string {
   const boot = byName(/DHT bootstrap/);
   const disc = byName(/Discovery → mutual/);
   const rtt = byName(/Text RTT/);
-  const m1 = byName(/Media 1MB transfer time/);
-  const m10 = byName(/Media 10MB transfer time/);
-  const thr1 = byName(/Media 1MB throughput$/);
-  const thr10 = byName(/Media 10MB throughput$/);
+  const old1 = byName(/Media 1MB OLD \(JSON\/b64\) throughput/);
+  const new1 = byName(/Media 1MB NEW \(binary\) throughput/);
+  const old10 = byName(/Media 10MB OLD \(JSON\/b64\) throughput/);
+  const new10 = byName(/Media 10MB NEW \(binary\) throughput/);
+  const pl1 = byName(/Media 1MB throughput \(PeerLink binary\)/);
+  const pl10 = byName(/Media 10MB throughput \(PeerLink binary\)/);
   const vid = byName(/Video-call setup/);
   const fan3 = byName(/fan-out N=3/);
   const fan6 = byName(/fan-out N=6/);
@@ -699,14 +772,24 @@ function buildReport(startedAt: Date, elapsedSec: number): string {
       `- **Text RTT** median ${fmtMs(rtt.stats.median)} is pure framed JSON over an already-open hyperswarm socket (no discovery). This is the floor for chat interactivity.`,
     );
   }
-  if (m1 && thr1) {
+  if (old1 && new1) {
+    const speedup = new1.stats.median / old1.stats.median;
     lines.push(
-      `- **1MB media** median ${fmtMs(m1.stats.median)} (~${fmtMBps(thr1.stats.median)}) uses default chunk size ${DEFAULT_CHUNK_BYTES} raw bytes, base64 on the wire (~33% overhead), drain-aware writes.`,
+      `- **1MB media OLD→NEW (localhost TCP):** ${fmtMBps(old1.stats.median)} → ${fmtMBps(new1.stats.median)}` +
+        ` (**${speedup.toFixed(2)}×**). OLD = newline-JSON + base64 @ ${LEGACY_CHUNK_BYTES} raw; NEW = binary wire @ ${DEFAULT_CHUNK_BYTES} raw.`,
     );
   }
-  if (m10 && thr10) {
+  if (old10 && new10) {
+    const speedup = new10.stats.median / old10.stats.median;
     lines.push(
-      `- **10MB media** median ${fmtMs(m10.stats.median)} (~${fmtMBps(thr10.stats.median)}). Compare with 1MB: if throughput stays flat, you're socket/CPU bound; if it drops, backpressure or GC is biting.`,
+      `- **10MB media OLD→NEW (localhost TCP):** ${fmtMBps(old10.stats.median)} → ${fmtMBps(new10.stats.median)}` +
+        ` (**${speedup.toFixed(2)}×**). Same framing delta at larger payload.`,
+    );
+  }
+  if (pl1) {
+    lines.push(
+      `- **1MB PeerLink e2e (binary over hyperswarm testnet)** median ${fmtMBps(pl1.stats.median)}.` +
+        (pl10 ? ` 10MB PeerLink median ${fmtMBps(pl10.stats.median)}.` : ''),
     );
   }
   if (vid) {

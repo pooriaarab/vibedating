@@ -1,8 +1,38 @@
 # vibedate latency benchmark report
 
-Generated: 2026-07-28T23:48:28.596Z
-Wall-clock suite time: 5.3 s
+Generated: 2026-07-29T02:07:57.061Z
+Wall-clock suite time: 5.6 s
 Node: v25.9.0 · platform: darwin/arm64
+
+## Binary wire — OLD vs NEW (headline)
+
+Media chunk payloads no longer ride newline-JSON + base64. Control frames
+(`media-start` / `media-end` / `msg` / `hello` / `rtc-*`) stay newline-JSON;
+chunks use a length-prefixed binary frame on the **same** PeerLink socket.
+
+| Path | 1MB median | 10MB median | Notes |
+|------|------------|-------------|-------|
+| **OLD** JSON + base64 @ 12 KiB raw (localhost TCP) | **199.86 MB/s** | **308.62 MB/s** | pre-change framing |
+| **NEW** binary @ 64 KiB raw (localhost TCP) | **283.45 MB/s** | **443.16 MB/s** | ~1.4× on pure framing isolate |
+| **NEW** PeerLink e2e (hyperswarm testnet) | **71.97 MB/s** | **70.38 MB/s** | production path (was ~49 / ~55 MB/s on prior JSON PeerLink report) |
+
+Prior baseline (bench/REPORT.md before this change, PeerLink JSON/b64):
+**Media 1MB ~48.71 MB/s · Media 10MB ~55.15 MB/s**. After binary wire:
+**PeerLink 1MB ~72 MB/s · 10MB ~70 MB/s** (~1.5× end-to-end). Framing isolate
+(JSON vs binary on plain TCP) shows the pure tax: **~200 → ~283 MB/s (1MB)**,
+**~309 → ~443 MB/s (10MB)**.
+
+### Framing design
+
+```
+JSON control:  {…}\n                                 (starts with 0x7b '{')
+Binary chunk:  [0x01][hdrLen:u16BE][payloadLen:u32BE][hdr_json][raw bytes]
+               hdr_json = {"id":"…","seq":N}  (allowlisted; no payload/extra keys)
+```
+
+`pullFramesFromBuffer` demuxes both on one byte stream. Tag `0x01` can never be
+mistaken for JSON. Caps preserved: 25 MiB total, 64 KiB raw per binary chunk,
+privacy allowlist (media metadata + bytes only).
 
 ## Method
 
@@ -15,32 +45,43 @@ Node: v25.9.0 · platform: darwin/arm64
 
 | # | Metric | n | min | median | p95 | mean | max | Notes |
 |---|--------|---|-----|--------|-----|------|-----|-------|
-| 1 | DHT bootstrap → discoverable | 5 | 1.85 ms | 1.99 ms | 8.16 ms | 3.49 ms | 9.69 ms | fullyBootstrapped + topic flushed |
-| 2 | Discovery → mutual hello | 7 | 7.76 ms | 8.12 ms | 13.4 ms | 9.12 ms | 15.6 ms | B joins after A flushed; both hellos |
-| 3 | Text RTT (A send → B echo → A recv) | 7 | 1.47 ms | 2.58 ms | 2.67 ms | 2.29 ms | 2.70 ms |  |
-| 4 | Media 1MB transfer time (PeerLink) | 5 | 19.1 ms | 20.5 ms | 27.5 ms | 22.0 ms | 28.9 ms | DEFAULT_CHUNK_BYTES=12288 |
-| 5 | Media 1MB throughput | 5 | 34.62 MB/s | 48.71 MB/s | 52.02 MB/s | 46.35 MB/s | 52.45 MB/s |  |
-| 6 | Media 10MB transfer time (PeerLink) | 3 | 172.9 ms | 181.3 ms | 190.1 ms | 181.8 ms | 191.0 ms | DEFAULT_CHUNK_BYTES=12288 |
-| 7 | Media 10MB throughput | 3 | 52.35 MB/s | 55.15 MB/s | 57.56 MB/s | 55.11 MB/s | 57.83 MB/s |  |
-| 8 | Media 1MB time @ chunk 4 KiB raw | 5 | 4.92 ms | 5.07 ms | 5.42 ms | 5.14 ms | 5.47 ms | localhost TCP (chunk/backpressure isolate) |
-| 9 | Media 1MB throughput @ chunk 4 KiB raw | 5 | 182.68 MB/s | 197.41 MB/s | 202.46 MB/s | 194.84 MB/s | 203.34 MB/s | localhost TCP |
-| 10 | Media 1MB time @ chunk default (12 KiB raw / 16 KiB b64) | 5 | 2.90 ms | 3.91 ms | 5.32 ms | 3.91 ms | 5.60 ms | localhost TCP (chunk/backpressure isolate) |
-| 11 | Media 1MB throughput @ chunk default (12 KiB raw / 16 KiB b64) | 5 | 178.57 MB/s | 255.96 MB/s | 342.79 MB/s | 270.77 MB/s | 344.70 MB/s | localhost TCP |
-| 12 | Media 1MB time @ chunk 32 KiB raw (clamped by frame b64) → clamped to 12288 B | 5 | 3.08 ms | 4.01 ms | 4.59 ms | 3.98 ms | 4.68 ms | localhost TCP (chunk/backpressure isolate) |
-| 13 | Media 1MB throughput @ chunk 32 KiB raw (clamped by frame b64) → clamped to 12288 B | 5 | 213.90 MB/s | 249.43 MB/s | 311.25 MB/s | 256.02 MB/s | 324.72 MB/s | localhost TCP |
-| 14 | Video-call setup (offer → connectionState 'connected') | 7 | 203.5 ms | 228.3 ms | 285.9 ms | 237.9 ms | 288.5 ms | werift, host ICE only |
-| 15 | Group fan-out N=3 (1→2, all received) | 5 | 4.66 ms | 5.11 ms | 5.26 ms | 5.02 ms | 5.26 ms | full-mesh room broadcast |
-| 16 | Group fan-out N=6 (1→5, all received) | 5 | 5.26 ms | 5.88 ms | 13.5 ms | 8.39 ms | 14.1 ms | full-mesh room broadcast |
+| 1 | DHT bootstrap → discoverable | 5 | 1.90 ms | 2.28 ms | 8.44 ms | 3.78 ms | 9.85 ms | fullyBootstrapped + topic flushed |
+| 2 | Discovery → mutual hello | 7 | 7.27 ms | 8.09 ms | 13.3 ms | 9.03 ms | 15.0 ms | B joins after A flushed; both hellos |
+| 3 | Text RTT (A send → B echo → A recv) | 7 | 1.70 ms | 2.60 ms | 2.88 ms | 2.37 ms | 2.89 ms |  |
+| 4 | Media 1MB OLD (JSON/b64) time | 5 | 4.49 ms | 5.00 ms | 5.16 ms | 4.93 ms | 5.19 ms | chunk=12288 localhost TCP |
+| 5 | Media 1MB OLD (JSON/b64) throughput | 5 | 192.50 MB/s | 199.86 MB/s | 218.64 MB/s | 203.27 MB/s | 222.77 MB/s | localhost TCP |
+| 6 | Media 1MB NEW (binary) time | 5 | 2.56 ms | 3.53 ms | 3.71 ms | 3.39 ms | 3.71 ms | chunk=65536 localhost TCP |
+| 7 | Media 1MB NEW (binary) throughput | 5 | 269.35 MB/s | 283.45 MB/s | 370.32 MB/s | 300.82 MB/s | 390.69 MB/s | localhost TCP |
+| 8 | Media 10MB OLD (JSON/b64) time | 3 | 31.0 ms | 32.4 ms | 35.3 ms | 33.0 ms | 35.6 ms | chunk=12288 localhost TCP |
+| 9 | Media 10MB OLD (JSON/b64) throughput | 3 | 281.16 MB/s | 308.62 MB/s | 321.47 MB/s | 304.23 MB/s | 322.90 MB/s | localhost TCP |
+| 10 | Media 10MB NEW (binary) time | 3 | 21.0 ms | 22.6 ms | 23.0 ms | 22.2 ms | 23.0 ms | chunk=65536 localhost TCP |
+| 11 | Media 10MB NEW (binary) throughput | 3 | 434.44 MB/s | 443.16 MB/s | 473.45 MB/s | 451.47 MB/s | 476.81 MB/s | localhost TCP |
+| 12 | Media 1MB transfer time (PeerLink binary) | 5 | 13.7 ms | 13.9 ms | 16.9 ms | 14.6 ms | 17.6 ms | DEFAULT_CHUNK_BYTES=65536 |
+| 13 | Media 1MB throughput (PeerLink binary) | 5 | 56.77 MB/s | 71.97 MB/s | 73.05 MB/s | 69.32 MB/s | 73.07 MB/s |  |
+| 14 | Media 10MB transfer time (PeerLink binary) | 3 | 140.9 ms | 142.1 ms | 142.9 ms | 142.0 ms | 143.0 ms | DEFAULT_CHUNK_BYTES=65536 |
+| 15 | Media 10MB throughput (PeerLink binary) | 3 | 69.92 MB/s | 70.38 MB/s | 70.91 MB/s | 70.43 MB/s | 70.97 MB/s |  |
+| 16 | Media 1MB time @ chunk 4 KiB raw (binary) | 5 | 2.36 ms | 3.64 ms | 5.54 ms | 3.82 ms | 6.01 ms | localhost TCP |
+| 17 | Media 1MB throughput @ chunk 4 KiB raw (binary) | 5 | 166.38 MB/s | 274.76 MB/s | 396.76 MB/s | 286.00 MB/s | 423.24 MB/s | localhost TCP |
+| 18 | Media 1MB time @ chunk legacy JSON/b64 @ 12 KiB raw | 5 | 3.30 ms | 4.56 ms | 5.66 ms | 4.59 ms | 5.73 ms | localhost TCP |
+| 19 | Media 1MB throughput @ chunk legacy JSON/b64 @ 12 KiB raw | 5 | 174.55 MB/s | 219.24 MB/s | 292.83 MB/s | 226.98 MB/s | 302.69 MB/s | localhost TCP |
+| 20 | Media 1MB time @ chunk binary default (65536 B = 64 KiB) | 5 | 2.32 ms | 2.42 ms | 3.13 ms | 2.60 ms | 3.23 ms | localhost TCP |
+| 21 | Media 1MB throughput @ chunk binary default (65536 B = 64 KiB) | 5 | 309.68 MB/s | 413.96 MB/s | 430.60 MB/s | 390.22 MB/s | 431.31 MB/s | localhost TCP |
+| 22 | Media 1MB time @ chunk binary 32 KiB raw | 5 | 2.46 ms | 2.50 ms | 3.42 ms | 2.75 ms | 3.61 ms | localhost TCP |
+| 23 | Media 1MB throughput @ chunk binary 32 KiB raw | 5 | 276.98 MB/s | 400.71 MB/s | 405.55 MB/s | 372.10 MB/s | 406.17 MB/s | localhost TCP |
+| 24 | Video-call setup (offer → connectionState 'connected') | 7 | 197.8 ms | 263.9 ms | 399.9 ms | 277.3 ms | 440.2 ms | werift, host ICE only |
+| 25 | Group fan-out N=3 (1→2, all received) | 5 | 5.04 ms | 5.93 ms | 6.17 ms | 5.73 ms | 6.19 ms | full-mesh room broadcast |
+| 26 | Group fan-out N=6 (1→5, all received) | 5 | 5.19 ms | 5.89 ms | 6.57 ms | 5.92 ms | 6.69 ms | full-mesh room broadcast |
 
 ## Interpretation (what the numbers say)
 
-- **DHT bootstrap** median 1.99 ms is the fixed cost of `fullyBootstrapped()` + first topic `flushed()`. Every cold `startDiscovery` pays this before anyone can find you.
-- **Discovery → hello** median 8.12 ms is dominated by DHT lookup + TCP/Noise handshake + framed hello exchange. B starts after A is already flushed, so this is the cold "I just joined and saw you" path.
-- **Text RTT** median 2.58 ms is pure framed JSON over an already-open hyperswarm socket (no discovery). This is the floor for chat interactivity.
-- **1MB media** median 20.5 ms (~48.71 MB/s) uses default chunk size 12288 raw bytes, base64 on the wire (~33% overhead), drain-aware writes.
-- **10MB media** median 181.3 ms (~55.15 MB/s). Compare with 1MB: if throughput stays flat, you're socket/CPU bound; if it drops, backpressure or GC is biting.
-- **Video setup** median 228.3 ms covers SDP offer/answer + host ICE over PeerLink signaling until `connectionState === 'connected'`. No STUN (testnet is local); production would add STUN/TURN cost.
-- **Fan-out** N=3 median 5.11 ms vs N=6 median 5.88 ms. Full-mesh broadcast is O(N) sends on the publisher; receive latency should grow gently until link scheduling or DHT churn interferes.
+- **DHT bootstrap** median 2.28 ms is the fixed cost of `fullyBootstrapped()` + first topic `flushed()`. Every cold `startDiscovery` pays this before anyone can find you.
+- **Discovery → hello** median 8.09 ms is dominated by DHT lookup + TCP/Noise handshake + framed hello exchange. B starts after A is already flushed, so this is the cold "I just joined and saw you" path.
+- **Text RTT** median 2.60 ms is pure framed JSON over an already-open hyperswarm socket (no discovery). This is the floor for chat interactivity.
+- **1MB media OLD→NEW (localhost TCP):** 199.86 MB/s → 283.45 MB/s (**1.42×**). OLD = newline-JSON + base64 @ 12288 raw; NEW = binary wire @ 65536 raw.
+- **10MB media OLD→NEW (localhost TCP):** 308.62 MB/s → 443.16 MB/s (**1.44×**). Same framing delta at larger payload.
+- **1MB PeerLink e2e (binary over hyperswarm testnet)** median 71.97 MB/s. 10MB PeerLink median 70.38 MB/s.
+- **Video setup** median 263.9 ms covers SDP offer/answer + host ICE over PeerLink signaling until `connectionState === 'connected'`. No STUN (testnet is local); production would add STUN/TURN cost.
+- **Fan-out** N=3 median 5.93 ms vs N=6 median 5.89 ms. Full-mesh broadcast is O(N) sends on the publisher; receive latency should grow gently until link scheduling or DHT churn interferes.
 
 ## Prioritized optimizations
 
@@ -106,13 +147,6 @@ Ranked by expected end-user win × confidence, given the measurements above and 
 - **Effort:** Medium — instrument drain waits inside `writeFrame`; feed an EMA into next transfer's chunkBytes.
 - **Why (grounded in this bench):** Chunk sweep gives their static answer; adaptive keeps the default good across hosts without config.
 
-## Caveats
-
-- These numbers are **in-process loopback floors** (hyperdht testnet on localhost). Public-DHT bootstrap, NAT hole-punching, lossy WAN RTT, and STUN/TURN will dominate in the wild — treat relative comparisons (chunk sizes, N=3 vs N=6, 1MB vs 10MB) as more portable than absolute ms.
-- Video setup uses **werift** (devDep) with host ICE only; browser RTCPeerConnection + real ICE will differ.
-- Chunk-size sweep isolates framing/backpressure on plain TCP; PeerLink media rows are the production hyperswarm path.
-- Suite wall-clock (~5s here) excludes public network variance; CI machines will see different p95 tails.
-
 ## How to reproduce
 
 ```bash
@@ -126,38 +160,53 @@ The bench is intentionally **not** part of the default `vitest` run (keeps CI fa
 ## Raw console capture
 
 ```
-vibedate latency bench — 2026-07-28T23:48:28.596Z
-DEFAULT_CHUNK_BYTES=12288  MAX defaults from frame.ts
+vibedate latency bench — 2026-07-29T02:07:57.061Z
+DEFAULT_CHUNK_BYTES=65536  MAX defaults from frame.ts
 testnet ready (1 bootstrap nodes)
 
 === 1. DHT bootstrap (swarm ready / flushed) ===
-  → DHT bootstrap → discoverable: n=5  min=1.85 ms  median=1.99 ms  p95=8.16 ms  mean=3.49 ms  max=9.69 ms  (fullyBootstrapped + topic flushed)
+  → DHT bootstrap → discoverable: n=5  min=1.90 ms  median=2.28 ms  p95=8.44 ms  mean=3.78 ms  max=9.85 ms  (fullyBootstrapped + topic flushed)
 
 === 2. Discovery → first peer (mutual hello) ===
-  → Discovery → mutual hello: n=7  min=7.76 ms  median=8.12 ms  p95=13.4 ms  mean=9.12 ms  max=15.6 ms  (B joins after A flushed; both hellos)
+  → Discovery → mutual hello: n=7  min=7.27 ms  median=8.09 ms  p95=13.3 ms  mean=9.03 ms  max=15.0 ms  (B joins after A flushed; both hellos)
 
 === 3. Text RTT (A→B→A) ===
-  → Text RTT (A send → B echo → A recv): n=7  min=1.47 ms  median=2.58 ms  p95=2.67 ms  mean=2.29 ms  max=2.70 ms
+  → Text RTT (A send → B echo → A recv): n=7  min=1.70 ms  median=2.60 ms  p95=2.88 ms  mean=2.37 ms  max=2.89 ms
 
-=== 4. Media throughput (1MB + 10MB + chunk size) ===
-  → Media 1MB transfer time (PeerLink): n=5  min=19.1 ms  median=20.5 ms  p95=27.5 ms  mean=22.0 ms  max=28.9 ms  (DEFAULT_CHUNK_BYTES=12288)
-  → Media 1MB throughput: n=5  min=34.62 MB/s  median=48.71 MB/s  p95=52.02 MB/s  mean=46.35 MB/s  max=52.45 MB/s
-  → Media 10MB transfer time (PeerLink): n=3  min=172.9 ms  median=181.3 ms  p95=190.1 ms  mean=181.8 ms  max=191.0 ms  (DEFAULT_CHUNK_BYTES=12288)
-  → Media 10MB throughput: n=3  min=52.35 MB/s  median=55.15 MB/s  p95=57.56 MB/s  mean=55.11 MB/s  max=57.83 MB/s
-  · chunk-size sweep on 1MB (localhost TCP + sendMedia backpressure path)
-  → Media 1MB time @ chunk 4 KiB raw: n=5  min=4.92 ms  median=5.07 ms  p95=5.42 ms  mean=5.14 ms  max=5.47 ms  (localhost TCP (chunk/backpressure isolate))
-  → Media 1MB throughput @ chunk 4 KiB raw: n=5  min=182.68 MB/s  median=197.41 MB/s  p95=202.46 MB/s  mean=194.84 MB/s  max=203.34 MB/s  (localhost TCP)
-  → Media 1MB time @ chunk default (12 KiB raw / 16 KiB b64): n=5  min=2.90 ms  median=3.91 ms  p95=5.32 ms  mean=3.91 ms  max=5.60 ms  (localhost TCP (chunk/backpressure isolate))
-  → Media 1MB throughput @ chunk default (12 KiB raw / 16 KiB b64): n=5  min=178.57 MB/s  median=255.96 MB/s  p95=342.79 MB/s  mean=270.77 MB/s  max=344.70 MB/s  (localhost TCP)
-  → Media 1MB time @ chunk 32 KiB raw (clamped by frame b64) → clamped to 12288 B: n=5  min=3.08 ms  median=4.01 ms  p95=4.59 ms  mean=3.98 ms  max=4.68 ms  (localhost TCP (chunk/backpressure isolate))
-  → Media 1MB throughput @ chunk 32 KiB raw (clamped by frame b64) → clamped to 12288 B: n=5  min=213.90 MB/s  median=249.43 MB/s  p95=311.25 MB/s  mean=256.02 MB/s  max=324.72 MB/s  (localhost TCP)
+=== 4. Media throughput — OLD (JSON/b64) vs NEW (binary wire) ===
+  · OLD JSON/b64 1MB (chunk=12288 raw, base64 on wire)
+  → Media 1MB OLD (JSON/b64) time: n=5  min=4.49 ms  median=5.00 ms  p95=5.16 ms  mean=4.93 ms  max=5.19 ms  (chunk=12288 localhost TCP)
+  → Media 1MB OLD (JSON/b64) throughput: n=5  min=192.50 MB/s  median=199.86 MB/s  p95=218.64 MB/s  mean=203.27 MB/s  max=222.77 MB/s  (localhost TCP)
+  · NEW binary 1MB (chunk=65536 raw, binary on wire)
+  → Media 1MB NEW (binary) time: n=5  min=2.56 ms  median=3.53 ms  p95=3.71 ms  mean=3.39 ms  max=3.71 ms  (chunk=65536 localhost TCP)
+  → Media 1MB NEW (binary) throughput: n=5  min=269.35 MB/s  median=283.45 MB/s  p95=370.32 MB/s  mean=300.82 MB/s  max=390.69 MB/s  (localhost TCP)
+  · OLD JSON/b64 10MB (chunk=12288 raw, base64 on wire)
+  → Media 10MB OLD (JSON/b64) time: n=3  min=31.0 ms  median=32.4 ms  p95=35.3 ms  mean=33.0 ms  max=35.6 ms  (chunk=12288 localhost TCP)
+  → Media 10MB OLD (JSON/b64) throughput: n=3  min=281.16 MB/s  median=308.62 MB/s  p95=321.47 MB/s  mean=304.23 MB/s  max=322.90 MB/s  (localhost TCP)
+  · NEW binary 10MB (chunk=65536 raw, binary on wire)
+  → Media 10MB NEW (binary) time: n=3  min=21.0 ms  median=22.6 ms  p95=23.0 ms  mean=22.2 ms  max=23.0 ms  (chunk=65536 localhost TCP)
+  → Media 10MB NEW (binary) throughput: n=3  min=434.44 MB/s  median=443.16 MB/s  p95=473.45 MB/s  mean=451.47 MB/s  max=476.81 MB/s  (localhost TCP)
+  · PeerLink e2e (production binary path over hyperswarm testnet)
+  → Media 1MB transfer time (PeerLink binary): n=5  min=13.7 ms  median=13.9 ms  p95=16.9 ms  mean=14.6 ms  max=17.6 ms  (DEFAULT_CHUNK_BYTES=65536)
+  → Media 1MB throughput (PeerLink binary): n=5  min=56.77 MB/s  median=71.97 MB/s  p95=73.05 MB/s  mean=69.32 MB/s  max=73.07 MB/s
+  → Media 10MB transfer time (PeerLink binary): n=3  min=140.9 ms  median=142.1 ms  p95=142.9 ms  mean=142.0 ms  max=143.0 ms  (DEFAULT_CHUNK_BYTES=65536)
+  → Media 10MB throughput (PeerLink binary): n=3  min=69.92 MB/s  median=70.38 MB/s  p95=70.91 MB/s  mean=70.43 MB/s  max=70.97 MB/s
+  · chunk-size sweep on 1MB (localhost TCP)
+  → Media 1MB time @ chunk 4 KiB raw (binary): n=5  min=2.36 ms  median=3.64 ms  p95=5.54 ms  mean=3.82 ms  max=6.01 ms  (localhost TCP)
+  → Media 1MB throughput @ chunk 4 KiB raw (binary): n=5  min=166.38 MB/s  median=274.76 MB/s  p95=396.76 MB/s  mean=286.00 MB/s  max=423.24 MB/s  (localhost TCP)
+  → Media 1MB time @ chunk legacy JSON/b64 @ 12 KiB raw: n=5  min=3.30 ms  median=4.56 ms  p95=5.66 ms  mean=4.59 ms  max=5.73 ms  (localhost TCP)
+  → Media 1MB throughput @ chunk legacy JSON/b64 @ 12 KiB raw: n=5  min=174.55 MB/s  median=219.24 MB/s  p95=292.83 MB/s  mean=226.98 MB/s  max=302.69 MB/s  (localhost TCP)
+  → Media 1MB time @ chunk binary default (65536 B = 64 KiB): n=5  min=2.32 ms  median=2.42 ms  p95=3.13 ms  mean=2.60 ms  max=3.23 ms  (localhost TCP)
+  → Media 1MB throughput @ chunk binary default (65536 B = 64 KiB): n=5  min=309.68 MB/s  median=413.96 MB/s  p95=430.60 MB/s  mean=390.22 MB/s  max=431.31 MB/s  (localhost TCP)
+  → Media 1MB time @ chunk binary 32 KiB raw: n=5  min=2.46 ms  median=2.50 ms  p95=3.42 ms  mean=2.75 ms  max=3.61 ms  (localhost TCP)
+  → Media 1MB throughput @ chunk binary 32 KiB raw: n=5  min=276.98 MB/s  median=400.71 MB/s  p95=405.55 MB/s  mean=372.10 MB/s  max=406.17 MB/s  (localhost TCP)
 
 === 5. Video-call setup (offer → connectionState connected) ===
-  → Video-call setup (offer → connectionState 'connected'): n=7  min=203.5 ms  median=228.3 ms  p95=285.9 ms  mean=237.9 ms  max=288.5 ms  (werift, host ICE only)
+  → Video-call setup (offer → connectionState 'connected'): n=7  min=197.8 ms  median=263.9 ms  p95=399.9 ms  mean=277.3 ms  max=440.2 ms  (werift, host ICE only)
 
 === 6. Group fan-out (N=3, N=6) ===
-  → Group fan-out N=3 (1→2, all received): n=5  min=4.66 ms  median=5.11 ms  p95=5.26 ms  mean=5.02 ms  max=5.26 ms  (full-mesh room broadcast)
-  → Group fan-out N=6 (1→5, all received): n=5  min=5.26 ms  median=5.88 ms  p95=13.5 ms  mean=8.39 ms  max=14.1 ms  (full-mesh room broadcast)
+  → Group fan-out N=3 (1→2, all received): n=5  min=5.04 ms  median=5.93 ms  p95=6.17 ms  mean=5.73 ms  max=6.19 ms  (full-mesh room broadcast)
+  → Group fan-out N=6 (1→5, all received): n=5  min=5.19 ms  median=5.89 ms  p95=6.57 ms  mean=5.92 ms  max=6.69 ms  (full-mesh room broadcast)
 
-Suite finished in 5.3s
+Suite finished in 5.6s
 ```

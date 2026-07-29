@@ -4,7 +4,12 @@ import os from 'node:os';
 import path from 'node:path';
 import type { Duplex } from 'node:stream';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { MAX_MEDIA_SIZE, parseFrame, type MediaFrame } from './frame.js';
+import {
+  MAX_MEDIA_SIZE,
+  parseFrame,
+  pullFramesFromBuffer,
+  type MediaFrame,
+} from './frame.js';
 import {
   DEFAULT_CHUNK_BYTES,
   MediaReceiver,
@@ -13,43 +18,51 @@ import {
   type ReceivedMedia,
 } from './media.js';
 
-const isChunk = (l: string): boolean => l.includes('"media-chunk"');
-const isStart = (l: string): boolean => l.includes('"media-start"');
-const isEnd = (l: string): boolean => l.includes('"media-end"');
-
 /**
- * Build a fake socket: an EventEmitter with a `write` that records each line.
- * `backpressure=false` (default) is the fast path (write returns true);
- * `backpressure=true` returns false on every write so the test can prove the
- * sender waits for a hand-emitted 'drain' before its next frame.
+ * Build a fake socket: an EventEmitter with a `write` that records each write
+ * as a Buffer. `backpressure=false` (default) is the fast path (write returns
+ * true); `backpressure=true` returns false on every write so the test can prove
+ * the sender waits for a hand-emitted 'drain' before its next frame.
  */
-function fakeSocket(backpressure = false): Duplex & { lines: string[]; emit: EventEmitter['emit'] } {
+function fakeSocket(
+  backpressure = false,
+): Duplex & { chunks: Buffer[]; emit: EventEmitter['emit'] } {
   const obj = Object.assign(new EventEmitter(), {
-    lines: [] as string[],
-    write(this: { lines: string[] }, line: string): boolean {
-      this.lines.push(line);
+    chunks: [] as Buffer[],
+    write(this: { chunks: Buffer[] }, data: string | Buffer): boolean {
+      this.chunks.push(typeof data === 'string' ? Buffer.from(data, 'utf8') : Buffer.from(data));
       return !backpressure;
     },
   });
-  return obj as unknown as Duplex & { lines: string[]; emit: EventEmitter['emit'] };
+  return obj as unknown as Duplex & { chunks: Buffer[]; emit: EventEmitter['emit'] };
 }
 
-/** Drive every recorded frame through a fresh MediaReceiver, returning the
- *  ReceivedMedia list (in delivery order). */
-function reassemble(lines: string[], tmpDir: string): ReceivedMedia[] {
+/** Concatenate recorded writes and peel every multiplexed frame off. */
+function recordedFrames(chunks: Buffer[]): MediaFrame[] {
+  const buf = Buffer.concat(chunks);
+  const { frames } = pullFramesFromBuffer(buf);
+  return frames.filter(
+    (f): f is MediaFrame =>
+      f.t === 'media-start' || f.t === 'media-chunk' || f.t === 'media-end',
+  );
+}
+
+function countType(frames: MediaFrame[], t: MediaFrame['t']): number {
+  return frames.filter((f) => f.t === t).length;
+}
+
+/** Drive every recorded media frame through a MediaReceiver. */
+function reassemble(chunks: Buffer[], tmpDir: string): ReceivedMedia[] {
   const got: ReceivedMedia[] = [];
   const rx = new MediaReceiver((m) => got.push(m), { tmpDir });
-  for (const line of lines) {
-    const frame = parseFrame(line.trimEnd());
-    if (frame !== null) rx.handle(frame as MediaFrame);
-  }
+  for (const frame of recordedFrames(chunks)) rx.handle(frame);
   return got;
 }
 
 /** Yield once to the microtask queue so an awaited resolved promise resumes. */
 const tick = () => new Promise<void>((r) => queueMicrotask(r));
 
-describe('media — chunking + reassembly round-trip', () => {
+describe('media — chunking + reassembly round-trip (binary wire)', () => {
   let tmpDir: string;
   beforeEach(() => {
     tmpDir = mkdtempSync(path.join(os.tmpdir(), 'vibedating-media-'));
@@ -58,18 +71,23 @@ describe('media — chunking + reassembly round-trip', () => {
     rmSync(tmpDir, { recursive: true, force: true });
   });
 
-  it('round-trips a small buffer through one chunk', async () => {
+  it('round-trips a small buffer through one binary chunk', async () => {
     const socket = fakeSocket();
     const data = Buffer.from('hello media world', 'utf8');
     const { id, size } = await sendMedia({ socket, data, mime: 'text/plain', name: 'greet.txt' });
 
     expect(size).toBe(data.length);
     expect(id.length).toBeGreaterThan(0);
-    expect(socket.lines.filter(isStart).length).toBe(1);
-    expect(socket.lines.filter(isChunk).length).toBe(1);
-    expect(socket.lines.filter(isEnd).length).toBe(1);
+    const frames = recordedFrames(socket.chunks);
+    expect(countType(frames, 'media-start')).toBe(1);
+    expect(countType(frames, 'media-chunk')).toBe(1);
+    expect(countType(frames, 'media-end')).toBe(1);
+    // Binary path: chunk carries `data`, not `b64`.
+    const chunk = frames.find((f) => f.t === 'media-chunk')!;
+    expect('data' in chunk).toBe(true);
+    expect('b64' in chunk).toBe(false);
 
-    const got = reassemble(socket.lines, tmpDir);
+    const got = reassemble(socket.chunks, tmpDir);
     expect(got.length).toBe(1);
     expect(got[0]!.mime).toBe('text/plain');
     expect(got[0]!.name).toBe('greet.txt');
@@ -79,8 +97,7 @@ describe('media — chunking + reassembly round-trip', () => {
 
   it('round-trips a multi-chunk buffer (>= DEFAULT_CHUNK_BYTES) keeping order', async () => {
     const socket = fakeSocket();
-    // ~3 chunks at DEFAULT_CHUNK_BYTES (12288), pseudo-random bytes so they
-    // don't trivially compress in any future b64-related change.
+    // ~3 chunks at DEFAULT_CHUNK_BYTES (64 KiB), pseudo-random bytes.
     const data = Buffer.alloc(DEFAULT_CHUNK_BYTES * 2 + 1234);
     for (let i = 0; i < data.length; i++) data[i] = (i * 31 + 7) & 0xff;
 
@@ -91,9 +108,9 @@ describe('media — chunking + reassembly round-trip', () => {
       name: 'blob.bin',
     });
     expect(size).toBe(data.length);
-    expect(socket.lines.filter(isChunk).length).toBe(3); // 12288 + 12288 + 1234
+    expect(countType(recordedFrames(socket.chunks), 'media-chunk')).toBe(3);
 
-    const got = reassemble(socket.lines, tmpDir);
+    const got = reassemble(socket.chunks, tmpDir);
     expect(got.length).toBe(1);
     expect(readFileSync(got[0]!.path)).toEqual(data);
     expect(got[0]!.size).toBe(data.length);
@@ -107,10 +124,28 @@ describe('media — chunking + reassembly round-trip', () => {
 
     await sendMediaFile({ socket, path: filePath });
 
-    const got = reassemble(socket.lines, tmpDir);
+    const got = reassemble(socket.chunks, tmpDir);
     expect(got.length).toBe(1);
     expect(got[0]!.mime).toBe('image/png');
     expect(got[0]!.name).toBe('pic.png');
+    expect(readFileSync(got[0]!.path)).toEqual(data);
+  });
+
+  it('still accepts legacy JSON/base64 chunks on the receiver', async () => {
+    const socket = fakeSocket();
+    const data = Buffer.from('legacy path still works', 'utf8');
+    await sendMedia({
+      socket,
+      data,
+      mime: 'text/plain',
+      name: 'leg.txt',
+      legacyJson: true,
+    });
+    // Legacy writes are pure newline-JSON; every write should contain '"b64"'.
+    const joined = Buffer.concat(socket.chunks).toString('utf8');
+    expect(joined).toContain('"b64"');
+    const got = reassemble(socket.chunks, tmpDir);
+    expect(got.length).toBe(1);
     expect(readFileSync(got[0]!.path)).toEqual(data);
   });
 });
@@ -140,45 +175,38 @@ describe('media — caps + rejection', () => {
     // Ship 8 real bytes but lie that size is 4 — the receiver must abort.
     const socket = fakeSocket();
     await sendMedia({ socket, data: Buffer.from('12345678', 'utf8'), mime: 'text/plain', name: 'x.txt' });
-    const tampered = socket.lines.map((line) =>
-      isStart(line) ? line.replace('"size":8', '"size":4') : line,
-    );
-    expect(reassemble(tampered, tmpDir).length).toBe(0);
+    // Tamper with media-start size on the JSON control frame portion.
+    const wire = Buffer.concat(socket.chunks).toString('binary');
+    const tampered = Buffer.from(wire.replace('"size":8', '"size":4'), 'binary');
+    expect(reassemble([tampered], tmpDir).length).toBe(0);
   });
 
   it('receiver rejects a duplicate / out-of-order seq', async () => {
-    const socket = fakeSocket();
-    await sendMedia({
-      socket,
-      data: Buffer.from('abcdefgh', 'utf8'),
-      mime: 'text/plain',
-      name: 'x.txt',
-      chunkBytes: 4,
-    });
-    // Rewrite the second chunk's seq from 1 -> 0 so it duplicates seq 0.
-    const tampered = socket.lines.map((line) =>
-      line.includes('"seq":1') ? line.replace('"seq":1', '"seq":0') : line,
-    );
-    expect(reassemble(tampered, tmpDir).length).toBe(0);
+    const got: ReceivedMedia[] = [];
+    const rx = new MediaReceiver((m) => got.push(m), { tmpDir });
+    rx.handle({ t: 'media-start', id: 'x', mime: 'text/plain', size: 8, name: 'x.txt' });
+    rx.handle({ t: 'media-chunk', id: 'x', seq: 0, data: Buffer.from('abcd') });
+    // Duplicate seq 0 instead of 1.
+    rx.handle({ t: 'media-chunk', id: 'x', seq: 0, data: Buffer.from('efgh') });
+    rx.handle({ t: 'media-end', id: 'x' });
+    expect(got.length).toBe(0);
   });
 
   it('receiver drops media-end for an incomplete transfer', async () => {
-    const socket = fakeSocket();
-    await sendMedia({
-      socket,
-      data: Buffer.from('abcdefgh', 'utf8'),
-      mime: 'text/plain',
-      name: 'x.txt',
-      chunkBytes: 4,
-    });
-    // Remove the second chunk entirely, keep media-end -> incomplete.
-    const lines = socket.lines.filter((l) => !l.includes('"seq":1'));
-    expect(reassemble(lines, tmpDir).length).toBe(0);
+    const got: ReceivedMedia[] = [];
+    const rx = new MediaReceiver((m) => got.push(m), { tmpDir });
+    rx.handle({ t: 'media-start', id: 'x', mime: 'text/plain', size: 8, name: 'x.txt' });
+    rx.handle({ t: 'media-chunk', id: 'x', seq: 0, data: Buffer.from('abcd') });
+    // Missing second chunk — incomplete.
+    rx.handle({ t: 'media-end', id: 'x' });
+    expect(got.length).toBe(0);
   });
 
   it('receiver ignores a media-chunk with no preceding media-start', () => {
     const got: ReceivedMedia[] = [];
     const rx = new MediaReceiver((m) => got.push(m), { tmpDir });
+    rx.handle({ t: 'media-chunk', id: 'orphan', seq: 0, data: Buffer.from([0, 0, 0]) });
+    // Also the legacy shape.
     const orphan = parseFrame(
       JSON.stringify({ t: 'media-chunk', id: 'orphan', seq: 0, b64: 'AAAA' }),
     ) as MediaFrame;
@@ -196,51 +224,50 @@ describe('media — backpressure', () => {
     rmSync(tmpDir, { recursive: true, force: true });
   });
 
-  /**
-   * A gated socket: every write returns false, and the sender must wait for a
-   * manually-emitted 'drain' before its next write. If sendMedia honored
-   * backpressure, each 'drain' advances exactly ONE frame; if it ignored it,
-   * all frames would be written immediately regardless of drain.
-   */
-    function gatedSocket(): Duplex & { lines: string[]; emit: EventEmitter['emit'] } {
+  function gatedSocket(): Duplex & { chunks: Buffer[]; emit: EventEmitter['emit'] } {
     return fakeSocket(true);
   }
 
   it('awaits drain between every frame (one drain advances exactly one frame)', async () => {
     const socket = gatedSocket();
-    const data = Buffer.alloc(DEFAULT_CHUNK_BYTES * 2 + 5); // -> 3 chunks
-    for (let i = 0; i < data.length; i++) data[i] = (i * 7) & 0xff;
+    // Small chunkBytes so we get exactly 3 binary chunks + start + end = 5 writes.
+    const chunkBytes = 4;
+    const data = Buffer.from('abcdefghijkl', 'utf8'); // 12 bytes → 3 chunks of 4
 
-    const sendP = sendMedia({ socket, data, mime: 'application/octet-stream', name: 'bp.bin' });
+    const sendP = sendMedia({
+      socket,
+      data,
+      mime: 'application/octet-stream',
+      name: 'bp.bin',
+      chunkBytes,
+    });
 
     // Synchronously the sender writes media-start, then parks on drain #1.
-    // No chunk has been written yet.
     await tick();
-    expect(socket.lines.filter(isStart).length).toBe(1);
-    expect(socket.lines.filter(isChunk).length).toBe(0);
+    expect(socket.chunks.length).toBe(1);
+    expect(countType(recordedFrames(socket.chunks), 'media-start')).toBe(1);
+    expect(countType(recordedFrames(socket.chunks), 'media-chunk')).toBe(0);
 
-    // Each emitted 'drain' releases exactly one more frame.
     socket.emit('drain'); // media-start drain -> chunk 0
     await tick();
-    expect(socket.lines.filter(isChunk).length).toBe(1);
+    expect(countType(recordedFrames(socket.chunks), 'media-chunk')).toBe(1);
 
     socket.emit('drain'); // chunk 0 drain -> chunk 1
     await tick();
-    expect(socket.lines.filter(isChunk).length).toBe(2);
+    expect(countType(recordedFrames(socket.chunks), 'media-chunk')).toBe(2);
 
     socket.emit('drain'); // chunk 1 drain -> chunk 2
     await tick();
-    expect(socket.lines.filter(isChunk).length).toBe(3);
+    expect(countType(recordedFrames(socket.chunks), 'media-chunk')).toBe(3);
 
     socket.emit('drain'); // chunk 2 drain -> media-end
     await tick();
-    expect(socket.lines.filter(isEnd).length).toBe(1);
+    expect(countType(recordedFrames(socket.chunks), 'media-end')).toBe(1);
 
     socket.emit('drain'); // media-end drain -> sendMedia resolves
     await sendP;
 
-    // Despite full backpressure, the reassembled bytes still round-trip exactly.
-    const got = reassemble(socket.lines, tmpDir);
+    const got = reassemble(socket.chunks, tmpDir);
     expect(got.length).toBe(1);
     expect(readFileSync(got[0]!.path)).toEqual(data);
   });
@@ -285,9 +312,9 @@ describe('media — backpressure', () => {
       mime: 'application/octet-stream',
       name: 'fast.bin',
     });
-    // No 'drain' listener was ever needed; all frames are on the wire.
-    expect(socket.lines.filter(isStart).length).toBe(1);
-    expect(socket.lines.filter(isChunk).length).toBeGreaterThanOrEqual(1);
-    expect(socket.lines.filter(isEnd).length).toBe(1);
+    const frames = recordedFrames(socket.chunks);
+    expect(countType(frames, 'media-start')).toBe(1);
+    expect(countType(frames, 'media-chunk')).toBeGreaterThanOrEqual(1);
+    expect(countType(frames, 'media-end')).toBe(1);
   });
 });

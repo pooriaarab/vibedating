@@ -12,9 +12,15 @@
  *     `rtc-*` WebRTC signaling frames (offer / answer / ice). Live A/V itself
  *     runs in the browser; these only ferry signaling over the P2P socket.
  *
- * Everything on the wire goes through {@link parseFrame}'s allowlist, so a peer
- * can never smuggle extra fields onto a `msg` (and thus never a raw-usage field).
- * The same allowlist guards every `media-*` frame, so the file-transfer path
+ * Wire mux (same socket for text + media + signal):
+ *   - Control / text frames are newline-JSON (start with `{`).
+ *   - Media CHUNK payloads are length-prefixed binary frames tagged 0x01.
+ *   {@link pullFramesFromBuffer} demuxes both without ambiguity.
+ *
+ * Everything on the wire goes through {@link parseFrame}'s allowlist (JSON) or
+ * the binary chunk header allowlist (id+seq only), so a peer can never smuggle
+ * extra fields onto a `msg` (and thus never a raw-usage field). The same
+ * allowlist guards every `media-*` control frame, so the file-transfer path
  * inherits the exact same invariant.
  *
  * The hello handshake has already happened by the time a link exists —
@@ -24,7 +30,14 @@
  */
 import { randomUUID } from 'node:crypto';
 import type { Duplex } from 'node:stream';
-import { parseFrame, serializeFrame, type Frame, type MediaFrame, type RtcFrame } from './frame.js';
+import {
+  parseFrame,
+  pullFramesFromBuffer,
+  serializeFrame,
+  type Frame,
+  type MediaFrame,
+  type RtcFrame,
+} from './frame.js';
 import {
   MediaReceiver,
   type ReceivedMedia,
@@ -69,18 +82,25 @@ export interface PeerLink {
  * Build a {@link PeerLink} over `socket`. `initialBuffer` carries any bytes the
  * caller already buffered after the hello line (so frames sent right after the
  * hello are not dropped). Pure-ish: attaches listeners to `socket`.
+ *
+ * `initialBuffer` may be a utf8 string (legacy handshake leftover of JSON
+ * control frames) or a raw Buffer (preferred once binary chunks can appear).
  */
 export function createPeerLink(
   socket: Duplex,
   hello: PeerHello,
-  initialBuffer = '',
+  initialBuffer: string | Buffer = '',
   linkOpts: CreatePeerLinkOptions = {},
 ): PeerLink {
   const messageCbs = new Set<(m: { id: string; text: string; at: number }) => void>();
   const mediaCbs = new Set<(m: ReceivedMedia) => void>();
   const signalCbs = new Set<(f: RtcFrame) => void>();
   const closeCbs = new Set<() => void>();
-  let buf = initialBuffer;
+  // Byte-oriented buffer so binary media-chunks and newline-JSON coexist.
+  let buf: Buffer =
+    typeof initialBuffer === 'string'
+      ? Buffer.from(initialBuffer, 'utf8')
+      : Buffer.from(initialBuffer);
   let closed = false;
 
   // Lazily created on the first onMedia() registration so a link that nobody
@@ -134,22 +154,18 @@ export function createPeerLink(
   };
 
   const pump = (): void => {
-    let nl: number;
-    while ((nl = buf.indexOf('\n')) >= 0) {
-      const line = buf.slice(0, nl);
-      buf = buf.slice(nl + 1);
-      if (line.trim() === '') continue;
-      const frame = parseFrame(line);
-      if (frame === null) continue; // malformed/unknown frame — drop, never crash
-      dispatch(frame);
-    }
+    if (buf.length === 0) return;
+    const { frames, rest } = pullFramesFromBuffer(buf);
+    buf = rest;
+    for (const frame of frames) dispatch(frame);
   };
 
   // Replay any leftover bytes the connection handler already had buffered.
   pump();
 
-  socket.on('data', (chunk: Buffer) => {
-    buf += chunk.toString('utf8');
+  socket.on('data', (chunk: Buffer | string) => {
+    const bytes = typeof chunk === 'string' ? Buffer.from(chunk, 'utf8') : chunk;
+    buf = buf.length === 0 ? Buffer.from(bytes) : Buffer.concat([buf, bytes]);
     pump();
   });
   socket.on('end', () => {
