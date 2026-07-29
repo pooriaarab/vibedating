@@ -70,7 +70,7 @@ import { createLiveBridge, createRoomBridge, startServer, type LiveBridge, type 
 import { runMcp } from './mcp.js';
 
 /** Mirrors package.json version (kept here; package.json imports are brittle under bundling). */
-const VERSION = '0.8.3';
+const VERSION = '0.8.4';
 
 /** Recognized top-level commands, plus the synthetic help/version. */
 export type Command =
