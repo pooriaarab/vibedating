@@ -2,7 +2,7 @@
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
   "name": "io.github.pooriaarab/vibedate",
   "description": "Dating by tokens, matched by usage league across agentic CLIs. Local-first.",
-  "version": "0.8.7",
+  "version": "0.8.8",
   "repository": {
     "url": "https://github.com/pooriaarab/vibedating",
     "source": "github",
@@ -13,7 +13,7 @@
       "registryType": "npm",
       "registryBaseUrl": "https://registry.npmjs.org",
       "identifier": "vibedate",
-      "version": "0.8.7",
+      "version": "0.8.8",
       "transport": {
         "type": "stdio"
       },
