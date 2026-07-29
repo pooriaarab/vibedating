@@ -163,9 +163,10 @@ export function createLiveBridge(): LiveBridge {
       link.onMedia((m) => {
         const mb = boxes.get(handle);
         if (!mb) {
-          fs.unlink(m.path, () => {}); // cleanup if peer gone
+          if (!m.error) fs.unlink(m.path, () => {}); // cleanup if peer gone
           return;
         }
+        if (m.error) return; // Ignore failed transfers
         mb.media.push({ ...m, name: sanitizePeerText(m.name), mime: sanitizePeerText(m.mime) });
         if (mb.media.length > MAX_QUEUED_MESSAGES) {
           const dropped = mb.media.splice(0, mb.media.length - MAX_QUEUED_MESSAGES);
@@ -531,7 +532,18 @@ async function handle(
   const pathname = url.pathname;
 
   if (req.method === 'GET' && pathname === '/') {
-    send(res, 200, 'text/html; charset=utf-8', webAppHtml);
+    const turnUrl = process.env['VIBEDATE_TURN_URL'];
+    let html = webAppHtml;
+    if (turnUrl) {
+      const turnUser = process.env['VIBEDATE_TURN_USER'];
+      const turnCred = process.env['VIBEDATE_TURN_CRED'];
+      const server: any = { urls: turnUrl };
+      if (turnUser) server.username = turnUser;
+      if (turnCred) server.credential = turnCred;
+      const script = `<script>window.__VIBE_ICE__={iceServers:${JSON.stringify([server]).replace(/</g, '\\u003c')}};</script>`;
+      html = html.replace('<script>', script + '\n<script>');
+    }
+    send(res, 200, 'text/html; charset=utf-8', html);
     return;
   }
 

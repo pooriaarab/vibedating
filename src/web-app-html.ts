@@ -1335,9 +1335,8 @@ export const webAppHtml = `<!DOCTYPE html>
   var idleIdx = 0;
 
   function rtcConfig(){
-    // A public STUN server crosses most NATs. No TURN in v0 — symmetric NATs
-    // won't connect, but signaling still completes and the call fails open.
-    return { iceServers: [{ urls: "stun:stun.l.google.com:19302" }] };
+    var extra = (window.__VIBE_ICE__ && window.__VIBE_ICE__.iceServers) || [];
+    return { iceServers: [{ urls: "stun:stun.l.google.com:19302" }].concat(extra) };
   }
   function sleep(ms){ return new Promise(function(r){ setTimeout(r, ms); }); }
 

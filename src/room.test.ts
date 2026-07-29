@@ -5,9 +5,10 @@
  * — it drives real hyperswarm sockets on an isolated in-process DHT.
  */
 import { createHash } from 'node:crypto';
-import { describe, expect, it } from 'vitest';
-import { ROOM_TOPIC_PREFIX, roomTopic } from './room.js';
-import { leagueTopic, TOPIC_PREFIX } from './p2p.js';
+import { describe, expect, it, vi } from 'vitest';
+import { ROOM_TOPIC_PREFIX, roomTopic, startRoom, MAX_ROOM } from './room.js';
+import * as p2p from './p2p.js';
+import { TOPIC_PREFIX, leagueTopic } from './p2p.js';
 
 describe('roomTopic', () => {
   it('is deterministic: same name → same 32-byte topic', () => {
@@ -31,5 +32,71 @@ describe('roomTopic', () => {
     // differ, so room discovery and 1:1 league discovery are fully separate.
     expect(roomTopic('10M')).not.toEqual(leagueTopic('10M'));
     expect(ROOM_TOPIC_PREFIX).not.toBe(TOPIC_PREFIX);
+  });
+});
+
+describe('startRoom', () => {
+  it('drops self-connections', async () => {
+    let onLinkCb: any;
+    vi.spyOn(p2p, 'startDiscovery').mockImplementation((opts) => {
+      onLinkCb = opts.onLink;
+      return Promise.resolve({
+        ready: Promise.resolve(),
+        peers: new Map(),
+        close: vi.fn(),
+      } as any);
+    });
+
+    const roomP = startRoom({
+      room: 'test',
+      hello: { handle: '@me', league: '10M', harness: 'fake', pubkey: 'pubkey1' },
+    });
+
+    await new Promise<void>(r => queueMicrotask(r));
+
+    const mockLink = {
+      hello: { handle: '@me', league: '10M', harness: 'fake', pubkey: 'pubkey1' },
+      close: vi.fn(),
+    };
+    onLinkCb(mockLink);
+    expect(mockLink.close).toHaveBeenCalled();
+  });
+
+  it('caps at MAX_ROOM', async () => {
+    let onLinkCb: any;
+    vi.spyOn(p2p, 'startDiscovery').mockImplementation((opts) => {
+      onLinkCb = opts.onLink;
+      return Promise.resolve({
+        ready: Promise.resolve(),
+        peers: new Map(),
+        close: vi.fn(),
+      } as any);
+    });
+
+    const roomP = startRoom({
+      room: 'test',
+      hello: { handle: '@me', league: '10M', harness: 'fake', pubkey: 'my-pubkey' },
+    });
+    await new Promise<void>(r => queueMicrotask(r));
+
+    // Fill the room
+    for (let i = 0; i < MAX_ROOM; i++) {
+      onLinkCb({
+        hello: { handle: `@peer${i}`, pubkey: `pk${i}` },
+        close: vi.fn(),
+        onMessage: vi.fn(),
+        onSignal: vi.fn(),
+        onClose: vi.fn(),
+      });
+    }
+
+    const mockLink = {
+      hello: { handle: '@toomany', pubkey: 'pk-too-many' },
+      send: vi.fn(),
+      close: vi.fn(),
+    };
+    onLinkCb(mockLink);
+    expect(mockLink.send).toHaveBeenCalledWith(expect.stringContaining('Room is full'));
+    expect(mockLink.close).toHaveBeenCalled();
   });
 });
