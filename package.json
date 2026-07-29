@@ -25,7 +25,8 @@
     "build": "tsup src/index.ts src/cli.ts src/mcp.ts --format esm --dts --clean",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "bench": "tsx bench/run.ts"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.0.0",
@@ -37,6 +38,7 @@
     "@types/node": "^20.11.0",
     "hyperdht": "^6.33.0",
     "tsup": "^8.0.0",
+    "tsx": "^4.23.1",
     "typescript": "^5.4.0",
     "vitest": "^1.6.0",
     "werift": "^0.24.1"
