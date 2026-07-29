@@ -889,9 +889,15 @@ async function cmdLive(
       // onMessage: no handler accumulation, no drops. A received file is notable
       // from any peer. AEGIS-lite: name is untrusted display data.
       link.onMedia((m) => {
-        process.stdout.write(
-          `  📎 <${sanitizePeerText(link.hello.handle)}> sent ${sanitizePeerText(m.name)} — saved to ${m.path}\n`,
-        );
+        if (m.error) {
+          process.stdout.write(
+            `  📎 <${sanitizePeerText(link.hello.handle)}> sent ${sanitizePeerText(m.name)} — FAILED to save: ${m.error.message}\n`,
+          );
+        } else {
+          process.stdout.write(
+            `  📎 <${sanitizePeerText(link.hello.handle)}> sent ${sanitizePeerText(m.name)} — saved to ${m.path}\n`,
+          );
+        }
       });
       pairing.add(link);
     },

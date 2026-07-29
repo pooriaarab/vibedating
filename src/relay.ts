@@ -311,6 +311,7 @@ export async function createNostrRelayLink(
 
   return {
     hello,
+    get closed() { return closed; },
     send(text) {
       if (closed) return;
       if (peerNostrPubkey === undefined) {

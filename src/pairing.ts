@@ -88,6 +88,9 @@ export interface LivePairing {
 /** ponytail: per-peer buffer cap; oldest dropped beyond it (bound memory). */
 const MAX_BUFFERED = 100;
 
+/** Hard cap on waiting links. Oldest dropped if exceeded. */
+const MAX_QUEUE = 100;
+
 /** Construct an empty pairing policy. */
 export function createPairing(): LivePairing {
   const queue: PeerLink[] = [];
@@ -133,7 +136,14 @@ export function createPairing(): LivePairing {
     link.onClose(() => {
       buffers.delete(link);
       if (current === link) {
-        const nextUp = queue.shift();
+        let nextUp: PeerLink | undefined;
+        while (queue.length > 0) {
+          const cand = queue.shift()!;
+          if (!cand.closed) {
+            nextUp = cand;
+            break;
+          }
+        }
         setCurrent(nextUp); // may be undefined → idle
       } else {
         const idx = queue.indexOf(link);
@@ -202,6 +212,10 @@ export function createPairing(): LivePairing {
         setCurrent(link); // omegle auto-pair (fresh link → flush is a no-op)
       } else {
         queue.push(link);
+        if (queue.length > MAX_QUEUE) {
+          const oldest = queue.shift()!;
+          oldest.close();
+        }
       }
     },
     next(): PeerLink | undefined {
@@ -209,7 +223,14 @@ export function createPairing(): LivePairing {
         current.close(); // local close — onClose won't fire, so advance manually
         current = undefined;
       }
-      const nextUp = queue.shift();
+      let nextUp: PeerLink | undefined;
+      while (queue.length > 0) {
+        const cand = queue.shift()!;
+        if (!cand.closed) {
+          nextUp = cand;
+          break;
+        }
+      }
       setCurrent(nextUp);
       return current;
     },
