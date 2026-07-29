@@ -69,10 +69,31 @@ function inferMime(name: string): string {
  * sender instead of buffering unbounded chunks in memory.
  */
 function writeFrame(socket: Duplex, line: string): Promise<void> {
-  return new Promise((resolve) => {
+  return new Promise((resolve, reject) => {
     const ok = socket.write(line);
     if (ok) resolve();
-    else socket.once('drain', () => resolve());
+    else {
+      const onDrain = () => {
+        cleanup();
+        resolve();
+      };
+      const onClose = () => {
+        cleanup();
+        reject(new Error('Socket closed before drain'));
+      };
+      const onError = (err: Error) => {
+        cleanup();
+        reject(err);
+      };
+      const cleanup = () => {
+        socket.removeListener('drain', onDrain);
+        socket.removeListener('close', onClose);
+        socket.removeListener('error', onError);
+      };
+      socket.once('drain', onDrain);
+      socket.once('close', onClose);
+      socket.once('error', onError);
+    }
   });
 }
 
@@ -162,6 +183,7 @@ export interface ReceivedMedia {
   /** Temp file path holding the reassembled bytes. */
   readonly path: string;
   readonly size: number;
+  readonly error?: Error;
 }
 
 interface Transfer {
@@ -259,8 +281,10 @@ export class MediaReceiver {
         const filePath = path.join(this.opts.tmpDir ?? os.tmpdir(), safeName(frame.id, tx.name));
         try {
           writeFileSync(filePath, buf);
-        } catch {
-          return; // disk full / bad path — best effort, never throw
+        } catch (err) {
+          const error = err instanceof Error ? err : new Error(String(err));
+          this.onMedia({ mime: tx.mime, name: tx.name, path: filePath, size: tx.received, error });
+          return;
         }
         this.onMedia({ mime: tx.mime, name: tx.name, path: filePath, size: tx.received });
         return;

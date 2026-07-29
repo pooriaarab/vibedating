@@ -245,6 +245,38 @@ describe('media — backpressure', () => {
     expect(readFileSync(got[0]!.path)).toEqual(data);
   });
 
+  it('rejects if socket closes before drain', async () => {
+    const socket = gatedSocket();
+    const data = Buffer.from('hello', 'utf8');
+    const sendP = sendMedia({ socket, data, mime: 'text/plain', name: 'close.txt' });
+
+    await tick();
+    socket.emit('close');
+    await expect(sendP).rejects.toThrow(/Socket closed before drain/);
+  });
+
+  it('rejects if socket errors before drain', async () => {
+    const socket = gatedSocket();
+    const data = Buffer.from('hello', 'utf8');
+    const sendP = sendMedia({ socket, data, mime: 'text/plain', name: 'err.txt' });
+
+    await tick();
+    socket.emit('error', new Error('boom'));
+    await expect(sendP).rejects.toThrow(/boom/);
+  });
+
+  it('receiver passes error to onMedia if writeFileSync fails', () => {
+    const got: ReceivedMedia[] = [];
+    const rx = new MediaReceiver((m) => got.push(m), { tmpDir: '/invalid/path/that/does/not/exist/12345' });
+    const id = 'bad';
+    rx.handle(parseFrame(`{"t":"media-start","id":"${id}","mime":"t","name":"t","size":1}`) as MediaFrame);
+    rx.handle(parseFrame(`{"t":"media-chunk","id":"${id}","seq":0,"b64":"YQ=="}`) as MediaFrame);
+    rx.handle(parseFrame(`{"t":"media-end","id":"${id}"}`) as MediaFrame);
+    
+    expect(got.length).toBe(1);
+    expect(got[0]!.error).toBeInstanceOf(Error);
+  });
+
   it('does not await drain when writes return true (fast path)', async () => {
     const socket = fakeSocket();
     await sendMedia({
