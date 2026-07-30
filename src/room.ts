@@ -23,7 +23,7 @@
  * allowlist are all inherited unchanged — a room member is just a discovered,
  * handshaken peer we happen to keep around instead of pairing one at a time.
  *
- * Privacy + AEGIS unchanged: rooms are consent-gated exactly like `live` (the
+ * Privacy + input-safety unchanged: rooms are consent-gated exactly like `live` (the
  * caller gates {@link startRoom} behind the `share:live` grant — see state.ts),
  * and peer text stays UNTRUSTED display data (the caller sanitizes before
  * printing). 1:1 modes are untouched — this module adds a new surface, it does

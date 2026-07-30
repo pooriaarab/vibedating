@@ -772,7 +772,7 @@ async function cmdLiveViaRelay(profile: ProfileState, to: string | undefined): P
     );
   });
   pairing.onMessage((from, m) => {
-    // AEGIS-lite: chat text is UNTRUSTED display data — sanitized before print.
+    // input-safety: chat text is UNTRUSTED display data — sanitized before print.
     process.stdout.write(`  <${sanitizePeerText(from)}> ${sanitizePeerText(m.text)}\n`);
   });
   pairing.onQueued((from, n) => {
@@ -881,13 +881,13 @@ async function cmdLive(
       return;
     }
     const { qual } = peerDirection(profile.league, link.hello.league);
-    // AEGIS-lite: the handle is wire data — display-sanitized, never trusted.
+    // input-safety: the handle is wire data — display-sanitized, never trusted.
     process.stdout.write(
       `  · matched ${sanitizePeerText(link.hello.handle)} (${link.hello.league}${qual} · ${link.hello.harness}) ${usageMark(link.hello)}${idMark(link.hello)}\n`,
     );
   });
   pairing.onMessage((from, m) => {
-    // AEGIS-lite: chat text is UNTRUSTED display data — never executed, never
+    // input-safety: chat text is UNTRUSTED display data — never executed, never
     // passed to a shell/agent; control/bidi chars stripped before printing.
     process.stdout.write(`  <${sanitizePeerText(from)}> ${sanitizePeerText(m.text)}\n`);
   });
@@ -920,7 +920,7 @@ async function cmdLive(
       }
       // Bind media receipt ONCE per link (not in onMatch) — same discipline as
       // onMessage: no handler accumulation, no drops. A received file is notable
-      // from any peer. AEGIS-lite: name is untrusted display data.
+      // from any peer. input-safety: name is untrusted display data.
       link.onMedia((m) => {
         if (m.error) {
           process.stdout.write(
@@ -1072,7 +1072,7 @@ async function cmdRoom(name: string | undefined, keepAlive: boolean): Promise<nu
     process.stdout.write(`  · room (${members.length}): ${list}\n`);
   });
   session.onMessage((m) => {
-    // AEGIS-lite: chat text is UNTRUSTED display data — sanitized before print.
+    // input-safety: chat text is UNTRUSTED display data — sanitized before print.
     process.stdout.write(`  <${sanitizePeerText(m.from)}> ${sanitizePeerText(m.text)}\n`);
   });
   process.stdout.write(
@@ -1300,7 +1300,7 @@ async function cmdDaemonRun(any: boolean): Promise<number> {
     acceptLeague,
     isBlocked: blockedChecker(),
     onPeer: (peer, isNew) => {
-      // AEGIS-lite: the handle is untrusted wire data — sanitized so a hostile
+      // input-safety: the handle is untrusted wire data — sanitized so a hostile
       // peer can't forge log lines in daemon.log.
       process.stdout.write(
         `  [${new Date().toISOString()}] ${isNew ? 'NEW match' : 'peer seen'}: ${sanitizePeerText(peer.handle)} (${peer.league} · ${peer.harness})\n`,
