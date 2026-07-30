@@ -152,7 +152,7 @@ export function createLiveBridge(): LiveBridge {
       link.onMessage((m) => {
         const mb = boxes.get(handle);
         if (!mb) return;
-        // AEGIS-lite: peer text is UNTRUSTED display data — never executed,
+        // input-safety: peer text is UNTRUSTED display data — never executed,
         // never passed to a shell/agent; sanitized at ingress (the web app
         // renders via textContent too — defense in depth).
         mb.messages.push({ ...m, text: sanitizePeerText(m.text) });
@@ -322,7 +322,7 @@ export function createRoomBridge(name: string): RoomBridge {
   const signalWaiters: Array<(s: RoomSignal | null) => void> = [];
 
   const drainMessage = (m: RoomMessage): void => {
-    // AEGIS-lite: peer text is UNTRUSTED display data — sanitized at ingress
+    // input-safety: peer text is UNTRUSTED display data — sanitized at ingress
     // (the web app renders via textContent too — defense in depth), mirroring
     // the LiveBridge.
     const safe: RoomMessage = { ...m, text: sanitizePeerText(m.text) };

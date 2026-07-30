@@ -246,7 +246,7 @@ export async function startDiscovery(opts: DiscoveryOptions): Promise<DiscoveryS
           try {
             notify(
               makeEvent('match', hello.harness as Harness, process.cwd(), {
-                // AEGIS-lite: the handle is untrusted wire data — sanitized for
+                // input-safety: the handle is untrusted wire data — sanitized for
                 // display (the structured `handle` field below stays verbatim).
                 summary: `matched with ${sanitizePeerText(peer.handle)} - LIVE SAME LEAGUE`,
                 handle: peer.handle,
