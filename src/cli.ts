@@ -38,7 +38,6 @@ import {
 import { ROOM_TOPIC_PREFIX, startRoom, type RoomSession } from './room.js';
 import { loadOrCreateIdentity, loadOrCreateNostrKey, signHelloClaims } from './identity.js';
 import { createNostrPoolTransport, createNostrRelayLink } from './relay.js';
-import { ensureHandle } from './handlegen.js';
 import { sanitizePeerText } from '@pooriaarab/vibe-core/untrusted';
 import {
   daemonStatus,
@@ -55,6 +54,7 @@ import {
   canShareLive,
   connectProfile,
   defaultStateDir,
+  ensureHandle,
   grantLiveConsent,
   isBlocked,
   loadBlocklist,
