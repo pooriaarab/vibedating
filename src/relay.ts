@@ -30,7 +30,7 @@
 import { createHash } from 'node:crypto';
 import type { PeerLink } from './link.js';
 import type { RtcFrame } from './frame.js';
-import type { ReceivedMedia } from './media.js';
+import type { ReceivedMedia } from '@pooriaarab/vibe-core/media';
 import type { PeerHello } from './p2p.js';
 
 /* -------------------------------------------------------------------------- */

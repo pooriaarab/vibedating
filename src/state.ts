@@ -14,6 +14,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { createConsentLedger } from '@pooriaarab/vibe-core';
 import type { ConsentGrant, ConsentLedger, ConsentStore, UsageSnapshot } from '@pooriaarab/vibe-core';
+import { generateHandle } from '@pooriaarab/vibe-core/handle';
 import { league } from './index.js';
 
 /** Atomically write a JSON object to a file to prevent partial reads by concurrent processes. */
@@ -250,6 +251,32 @@ export function resolveHandle(dir: string = defaultStateDir()): string {
     if (canonical !== null) return canonical;
   }
   return loadHandle(dir);
+}
+
+/** Outcome of {@link ensureHandle}: the effective handle + whether it was just minted. */
+export interface EnsuredHandle {
+  readonly handle: string;
+  /** True when a new handle was generated and persisted by this call. */
+  readonly generated: boolean;
+}
+
+/**
+ * Resolve the handle for a first-run flow, auto-assigning when unset:
+ *   1. a valid `VIBEDATING_HANDLE` env wins as a ONE-OFF (never persisted);
+ *   2. a persisted (non-default) handle is reused;
+ *   3. otherwise a memetic handle is generated (vibe-core/handle) and PERSISTED
+ *      — the bare default `@you` is never silently kept.
+ */
+export function ensureHandle(dir: string = defaultStateDir()): EnsuredHandle {
+  const env = process.env['VIBEDATING_HANDLE'];
+  if (env !== undefined && env.trim() !== '') {
+    const canonical = normalizeHandle(env);
+    if (canonical !== null) return { handle: canonical, generated: false };
+  }
+  const persisted = loadHandle(dir);
+  if (persisted !== DEFAULT_HANDLE) return { handle: persisted, generated: false };
+  const generated = generateHandle();
+  return { handle: saveHandle(generated, dir), generated: true };
 }
 
 /* -------------------------------------------------------------------------- */
