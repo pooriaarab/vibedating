@@ -34,7 +34,7 @@ import { parseFrame, type RtcFrame } from './frame.js';
 import type { PeerLink } from './link.js';
 import type { RoomMessage, RoomSession } from './room.js';
 import { connectProfile, loadProfile, type ProfileState } from './state.js';
-import { sanitizePeerText } from './untrusted.js';
+import { sanitizePeerText } from '@pooriaarab/vibe-core/untrusted';
 import { webAppHtml } from './web-app-html.js';
 import type { ReceivedMedia } from './media.js';
 

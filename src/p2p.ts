@@ -26,7 +26,7 @@ import { classifyHelloIdentity } from './identity.js';
 import { createPeerLink, type PeerLink } from './link.js';
 import { loadPeers, recordPeer, recordPeerMessage, type StoredPeer } from './peerstore.js';
 import { defaultStateDir } from './state.js';
-import { sanitizePeerText } from './untrusted.js';
+import { sanitizePeerText } from '@pooriaarab/vibe-core/untrusted';
 
 /* -------------------------------------------------------------------------- */
 /* Topic derivation                                                           */
