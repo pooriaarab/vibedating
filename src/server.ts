@@ -36,7 +36,7 @@ import type { RoomMessage, RoomSession } from './room.js';
 import { connectProfile, loadProfile, type ProfileState } from './state.js';
 import { sanitizePeerText } from '@pooriaarab/vibe-core/untrusted';
 import { webAppHtml } from './web-app-html.js';
-import type { ReceivedMedia } from './media.js';
+import type { ReceivedMedia } from '@pooriaarab/vibe-core/media';
 
 /** Sink for milestone notifications. Injectable so tests can capture events. */
 export type NotifySink = (event: VibeEvent) => void;

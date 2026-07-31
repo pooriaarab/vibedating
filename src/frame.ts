@@ -199,8 +199,18 @@ export function parseFrame(raw: string | Buffer): Frame | null {
   // Soft-default harness for legacy hellos that omit it — same as the prior
   // hand-rolled parser (`typeof harness === 'string' ? harness : 'unknown'`).
   if (parsed.t === 'hello') {
-    const harness = typeof parsed.harness === 'string' ? parsed.harness : 'unknown';
-    return { ...parsed, harness } as Frame;
+    const hello = parsed as {
+      readonly t: 'hello';
+      readonly handle: string;
+      readonly league: string;
+      readonly harness?: string;
+      readonly verified?: boolean;
+      readonly pubkey?: string;
+      readonly nonce?: string;
+      readonly sig?: string;
+    };
+    const harness = typeof hello.harness === 'string' ? hello.harness : 'unknown';
+    return { ...hello, harness };
   }
   return parsed as Frame;
 }
