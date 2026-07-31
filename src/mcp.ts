@@ -58,7 +58,6 @@ import {
 } from './p2p.js';
 import { startRoom, type RoomMessage, type RoomSession } from './room.js';
 import { loadOrCreateIdentity, signHelloClaims } from './identity.js';
-import { ensureHandle } from './handlegen.js';
 import { sanitizePeerText } from '@pooriaarab/vibe-core/untrusted';
 import { daemonStatus } from './daemon.js';
 import { createPairing, type LivePairing, type PairingMessage } from './pairing.js';
@@ -67,6 +66,7 @@ import {
   addBlock,
   canShareLive,
   connectProfile,
+  ensureHandle,
   grantLiveConsent,
   isBlocked,
   loadBlocklist,
