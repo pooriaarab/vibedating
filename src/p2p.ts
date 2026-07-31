@@ -17,16 +17,17 @@
  * {@link startDiscovery} behind the `share:live` consent grant (see state.ts).
  * The {@link LIVE_NOTICE} line is what the CLI prints before joining.
  */
-import { createHash, randomBytes } from 'node:crypto';
+import { randomBytes } from 'node:crypto';
 import type { Harness, VibeEvent } from '@pooriaarab/vibe-core';
 import { makeEvent, notify as vibeCoreNotify } from '@pooriaarab/vibe-core';
+import { topicFor } from '@pooriaarab/vibe-core/ids';
+import { sanitizePeerText } from '@pooriaarab/vibe-core/untrusted';
 import { parseFrame, serializeFrame } from './frame.js';
 import { LIVE_NOTICE, parseHandshake, serializeHandshake, type PeerHello } from './handshake.js';
 import { classifyHelloIdentity } from './identity.js';
 import { createPeerLink, type PeerLink } from './link.js';
 import { loadPeers, recordPeer, recordPeerMessage, type StoredPeer } from './peerstore.js';
 import { defaultStateDir } from './state.js';
-import { sanitizePeerText } from '@pooriaarab/vibe-core/untrusted';
 
 /* -------------------------------------------------------------------------- */
 /* Topic derivation                                                           */
@@ -41,7 +42,9 @@ export const TOPIC_PREFIX = 'vibedate:';
  * entire discovery mechanism. Pure.
  */
 export function leagueTopic(leagueName: string): Buffer {
-  return createHash('sha256').update(`${TOPIC_PREFIX}${leagueName}`, 'utf8').digest();
+  // vibe-core/ids.topicFor returns the raw 32-byte sha256 Buffer — byte-identical
+  // to the prior createHash('sha256').update(prefix+name).digest().
+  return topicFor(TOPIC_PREFIX, leagueName);
 }
 
 /* -------------------------------------------------------------------------- */
