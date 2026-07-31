@@ -16,10 +16,10 @@ import {
   sendMedia,
   sendMediaFile,
   type ReceivedMedia,
-} from './media.js';
+} from '@pooriaarab/vibe-core/media';
 
 /**
- * Build a fake socket: an EventEmitter with a `write` that records each write
+ * Build a fake sink: an EventEmitter with a `write` that records each write
  * as a Buffer. `backpressure=false` (default) is the fast path (write returns
  * true); `backpressure=true` returns false on every write so the test can prove
  * the sender waits for a hand-emitted 'drain' before its next frame.
@@ -74,7 +74,7 @@ describe('media — chunking + reassembly round-trip (binary wire)', () => {
   it('round-trips a small buffer through one binary chunk', async () => {
     const socket = fakeSocket();
     const data = Buffer.from('hello media world', 'utf8');
-    const { id, size } = await sendMedia({ socket, data, mime: 'text/plain', name: 'greet.txt' });
+    const { id, size } = await sendMedia({ sink: socket, data, mime: 'text/plain', name: 'greet.txt' });
 
     expect(size).toBe(data.length);
     expect(id.length).toBeGreaterThan(0);
@@ -102,7 +102,7 @@ describe('media — chunking + reassembly round-trip (binary wire)', () => {
     for (let i = 0; i < data.length; i++) data[i] = (i * 31 + 7) & 0xff;
 
     const { size } = await sendMedia({
-      socket,
+      sink: socket,
       data,
       mime: 'application/octet-stream',
       name: 'blob.bin',
@@ -122,7 +122,7 @@ describe('media — chunking + reassembly round-trip (binary wire)', () => {
     const data = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 1, 2, 3, 4]);
     writeFileSync(filePath, data);
 
-    await sendMediaFile({ socket, path: filePath });
+    await sendMediaFile({ sink: socket, path: filePath });
 
     const got = reassemble(socket.chunks, tmpDir);
     expect(got.length).toBe(1);
@@ -135,7 +135,7 @@ describe('media — chunking + reassembly round-trip (binary wire)', () => {
     const socket = fakeSocket();
     const data = Buffer.from('legacy path still works', 'utf8');
     await sendMedia({
-      socket,
+      sink: socket,
       data,
       mime: 'text/plain',
       name: 'leg.txt',
@@ -163,7 +163,7 @@ describe('media — caps + rejection', () => {
     const socket = fakeSocket();
     await expect(
       sendMedia({
-        socket,
+        sink: socket,
         data: Buffer.alloc(MAX_MEDIA_SIZE + 1),
         mime: 'application/octet-stream',
         name: 'big.bin',
@@ -174,7 +174,7 @@ describe('media — caps + rejection', () => {
   it('receiver rejects a transfer whose running total exceeds the declared size', async () => {
     // Ship 8 real bytes but lie that size is 4 — the receiver must abort.
     const socket = fakeSocket();
-    await sendMedia({ socket, data: Buffer.from('12345678', 'utf8'), mime: 'text/plain', name: 'x.txt' });
+    await sendMedia({ sink: socket, data: Buffer.from('12345678', 'utf8'), mime: 'text/plain', name: 'x.txt' });
     // Tamper with media-start size on the JSON control frame portion.
     const wire = Buffer.concat(socket.chunks).toString('binary');
     const tampered = Buffer.from(wire.replace('"size":8', '"size":4'), 'binary');
@@ -235,7 +235,7 @@ describe('media — backpressure', () => {
     const data = Buffer.from('abcdefghijkl', 'utf8'); // 12 bytes → 3 chunks of 4
 
     const sendP = sendMedia({
-      socket,
+      sink: socket,
       data,
       mime: 'application/octet-stream',
       name: 'bp.bin',
@@ -275,7 +275,7 @@ describe('media — backpressure', () => {
   it('rejects if socket closes before drain', async () => {
     const socket = gatedSocket();
     const data = Buffer.from('hello', 'utf8');
-    const sendP = sendMedia({ socket, data, mime: 'text/plain', name: 'close.txt' });
+    const sendP = sendMedia({ sink: socket, data, mime: 'text/plain', name: 'close.txt' });
 
     await tick();
     socket.emit('close');
@@ -285,7 +285,7 @@ describe('media — backpressure', () => {
   it('rejects if socket errors before drain', async () => {
     const socket = gatedSocket();
     const data = Buffer.from('hello', 'utf8');
-    const sendP = sendMedia({ socket, data, mime: 'text/plain', name: 'err.txt' });
+    const sendP = sendMedia({ sink: socket, data, mime: 'text/plain', name: 'err.txt' });
 
     await tick();
     socket.emit('error', new Error('boom'));
@@ -307,7 +307,7 @@ describe('media — backpressure', () => {
   it('does not await drain when writes return true (fast path)', async () => {
     const socket = fakeSocket();
     await sendMedia({
-      socket,
+      sink: socket,
       data: Buffer.alloc(DEFAULT_CHUNK_BYTES * 2 + 1),
       mime: 'application/octet-stream',
       name: 'fast.bin',

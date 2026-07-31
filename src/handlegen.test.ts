@@ -2,8 +2,8 @@ import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { ensureHandle, generateHandle } from './handlegen.js';
-import { DEFAULT_HANDLE, MAX_HANDLE_LEN, loadHandle, normalizeHandle, saveHandle } from './state.js';
+import { generateHandle } from '@pooriaarab/vibe-core/handle';
+import { DEFAULT_HANDLE, MAX_HANDLE_LEN, ensureHandle, loadHandle, normalizeHandle, saveHandle } from './state.js';
 
 /** Seeded PRNG (mulberry32) — deterministic generation for tests. */
 function mulberry32(seed: number): () => number {

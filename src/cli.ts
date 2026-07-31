@@ -38,8 +38,7 @@ import {
 import { ROOM_TOPIC_PREFIX, startRoom, type RoomSession } from './room.js';
 import { loadOrCreateIdentity, loadOrCreateNostrKey, signHelloClaims } from './identity.js';
 import { createNostrPoolTransport, createNostrRelayLink } from './relay.js';
-import { ensureHandle } from './handlegen.js';
-import { sanitizePeerText } from './untrusted.js';
+import { sanitizePeerText } from '@pooriaarab/vibe-core/untrusted';
 import {
   daemonStatus,
   installDaemonService,
@@ -55,6 +54,7 @@ import {
   canShareLive,
   connectProfile,
   defaultStateDir,
+  ensureHandle,
   grantLiveConsent,
   isBlocked,
   loadBlocklist,
@@ -70,7 +70,7 @@ import { createLiveBridge, createRoomBridge, startServer, type LiveBridge, type 
 import { runMcp } from './mcp.js';
 
 /** Mirrors package.json version (kept here; package.json imports are brittle under bundling). */
-const VERSION = '0.8.7';
+const VERSION = '0.9.0';
 
 /** Recognized top-level commands, plus the synthetic help/version. */
 export type Command =

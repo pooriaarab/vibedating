@@ -29,7 +29,7 @@
  * printing). 1:1 modes are untouched — this module adds a new surface, it does
  * not alter the league/pairing path.
  */
-import { createHash } from 'node:crypto';
+import { topicFor } from '@pooriaarab/vibe-core/ids';
 import {
   startDiscovery,
   type DiscoverySession,
@@ -49,7 +49,7 @@ export const ROOM_TOPIC_PREFIX = 'vibedate-room:';
  * which is the entire discovery mechanism. Pure (mirrors {@link p2p.leagueTopic}).
  */
 export function roomTopic(name: string): Buffer {
-  return createHash('sha256').update(`${ROOM_TOPIC_PREFIX}${name}`, 'utf8').digest();
+  return topicFor(ROOM_TOPIC_PREFIX, name);
 }
 
 /** A room member = a connected, handshaken peer. Same shape as a live peer. */

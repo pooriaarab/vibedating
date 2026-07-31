@@ -20,7 +20,7 @@ import {
   type PeerHello,
 } from './p2p.js';
 import type { PeerLink } from './link.js';
-import { DEFAULT_CHUNK_BYTES, type ReceivedMedia } from './media.js';
+import { DEFAULT_CHUNK_BYTES, type ReceivedMedia } from '@pooriaarab/vibe-core/media';
 
 const ALICE: PeerHello = { handle: '@alice_10M', league: '10M', harness: 'claude-code' };
 const BOB: PeerHello = { handle: '@bob_10M', league: '10M', harness: 'codex' };
