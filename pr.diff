@@ -1,0 +1,56 @@
+diff --git a/.github/workflows/jscpd.yml b/.github/workflows/jscpd.yml
+new file mode 100644
+index 0000000..d45232c
+--- /dev/null
++++ b/.github/workflows/jscpd.yml
+@@ -0,0 +1,27 @@
++name: jscpd
++
++on:
++  pull_request:
++  push:
++    branches: [main]
++
++permissions:
++  contents: read
++
++concurrency:
++  group: ${{ github.workflow }}-${{ github.ref }}
++  cancel-in-progress: true
++
++jobs:
++  jscpd:
++    name: jscpd (copy-paste detection)
++    runs-on: ubicloud-standard-2
++    timeout-minutes: 10
++    steps:
++      - uses: actions/checkout@v4
++        with:
++          # bunx runs downloaded package code; keep the token out of .git/config.
++          persist-credentials: false
++      - uses: oven-sh/setup-bun@v2
++      - name: jscpd
++        run: bunx jscpd@5.1.1 --no-tips .
+diff --git a/.jscpd.json b/.jscpd.json
+new file mode 100644
+index 0000000..e1e7347
+--- /dev/null
++++ b/.jscpd.json
+@@ -0,0 +1,17 @@
++{
++  "min-tokens": 100,
++  "threshold": 5,
++  "mode": "mild",
++  "format": ["typescript", "tsx", "javascript", "jsx"],
++  "ignore": [
++    "**/__tests__/**",
++    "**/*.{test,spec}.{ts,tsx,js,jsx}",
++    "**/node_modules/**",
++    "**/.next/**",
++    "**/dist/**",
++    "**/build/**",
++    "**/coverage/**",
++    "**/vendor/**",
++    "**/*.min.js"
++  ]
++}
