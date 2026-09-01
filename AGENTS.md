@@ -29,3 +29,9 @@ Settings for this repo are in `.github/pr-standards.json`. The standard is at
 https://github.com/pooriaarab/scripts/blob/main/pr-standards.md
 
 <!-- pr-standards:end -->
+
+## Brand and design guidelines
+
+Read `.agents/brand.md` before changing public copy or documentation.
+
+Read `.agents/design.md` before changing the web app, CLI output, or MCP output.
