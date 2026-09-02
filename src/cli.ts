@@ -561,13 +561,8 @@ async function cmdDiscover(live: boolean, any: boolean, viaRelay: boolean): Prom
   return 0;
 }
 
-async function cmdOpen(
-  port: number | undefined,
-  any: boolean,
-  room: string | undefined,
-  viaRelay: boolean,
-  to: string | undefined,
-): Promise<number> {
+async function cmdOpen(opts: { port: number | undefined; any: boolean; room: string | undefined; viaRelay: boolean; to: string | undefined }): Promise<number> {
+  const { port, any, room, viaRelay, to } = opts;
   // Attach a live-signaling bridge IF the user has connected a profile, so the
   // web app can reach real peers. `open` is treated as the live opt-in exactly
   // like `live` / `discover --live` (the command invocation grants consent), and
@@ -833,13 +828,8 @@ async function cmdLiveViaRelay(profile: ProfileState, to: string | undefined): P
  * protocol + pairing policy are unit tested; this readline loop is manual-smoke
  * only.
  */
-async function cmdLive(
-  dating: boolean,
-  any: boolean,
-  to: string | undefined,
-  keepAlive: boolean,
-  viaRelay: boolean,
-): Promise<number> {
+async function cmdLive(opts: { dating: boolean; any: boolean; to: string | undefined; keepAlive: boolean; viaRelay: boolean }): Promise<number> {
+  const { dating, any, to, keepAlive, viaRelay } = opts;
   const profile = loadProfile();
   if (!profile) {
     process.stderr.write('Not connected yet. Run `vibedating connect` first.\n');
@@ -1464,9 +1454,9 @@ async function main(argv: readonly string[]): Promise<number> {
     case 'discover':
       return cmdDiscover(parsed.live, parsed.any, parsed.viaRelay);
     case 'open':
-      return cmdOpen(parsed.port, parsed.any, parsed.room, parsed.viaRelay, parsed.to);
+      return cmdOpen({ port: parsed.port, any: parsed.any, room: parsed.room, viaRelay: parsed.viaRelay, to: parsed.to });
     case 'live':
-      return cmdLive(parsed.dating, parsed.any, parsed.to, parsed.keepAlive, parsed.viaRelay);
+      return cmdLive({ dating: parsed.dating, any: parsed.any, to: parsed.to, keepAlive: parsed.keepAlive, viaRelay: parsed.viaRelay });
     case 'find':
       return cmdFind(parsed.arg, parsed.any);
     case 'room':
