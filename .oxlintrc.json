@@ -39,7 +39,7 @@
       }
     ],
     "max-params": [
-      "warn",
+      "error",
       {
         "max": 4
       }
@@ -60,7 +60,7 @@
     "prefer-const": "warn",
     "eqeqeq": "error",
     "no-debugger": "error",
-    "typescript/no-explicit-any": "warn",
+    "typescript/no-explicit-any": "error",
     "typescript/no-non-null-assertion": "warn",
     "import/no-cycle": "warn"
   },

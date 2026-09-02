@@ -537,7 +537,7 @@ async function handle(
     if (turnUrl) {
       const turnUser = process.env['VIBEDATE_TURN_USER'];
       const turnCred = process.env['VIBEDATE_TURN_CRED'];
-      const server: any = { urls: turnUrl };
+      const server: { urls: string; username?: string; credential?: string } = { urls: turnUrl };
       if (turnUser) server.username = turnUser;
       if (turnCred) server.credential = turnCred;
       const script = `<script>window.__VIBE_ICE__={iceServers:${JSON.stringify([server]).replace(/</g, '\\u003c')}};</script>`;
@@ -788,7 +788,7 @@ async function handle(
     try {
       // Allow up to 35MB base64 JSON payload (which decodes to ~25MB bytes).
       body = await readBody(req, 35 * 1024 * 1024);
-    } catch (e: any) {
+    } catch {
       sendJson(res, 413, { error: 'payload too large' });
       return;
     }
@@ -816,8 +816,9 @@ async function handle(
     await fs.promises.writeFile(tmpPath, decoded);
     try {
       await live.sendMedia(handle, tmpPath);
-    } catch (err: any) {
-      sendJson(res, 500, { error: err.message });
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      sendJson(res, 500, { error: msg });
       return;
     } finally {
       await fs.promises.unlink(tmpPath).catch(() => {});
