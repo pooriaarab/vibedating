@@ -75,6 +75,8 @@ export function createPeerLink(
   initialBuffer: string | Buffer = '',
   linkOpts: CreatePeerLinkOptions = {},
 ): PeerLink {
+  // Codec: vibedating's concrete Frame parser + serializer. Binary media-chunks
+  // bypass the JSON path inside vibe-core's pullFramesFromBuffer.
   const codec = {
     parse: parseFrame,
     serialize: (frame: Frame) => serializeFrame(frame),
@@ -149,6 +151,7 @@ function makeLinkHandlers(
 ): PeerLink {
   return {
     get hello() {
+      // core.hello is Hello | undefined; we always pass one.
       return core.hello ?? hello;
     },
     get closed() {
