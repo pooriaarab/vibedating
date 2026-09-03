@@ -144,13 +144,13 @@ function buildSpawnedPeer(
     handle: string;
   },
 ): SpawnedPeer {
-  let buffer = '';
+  const state = { buffer: '' };
   const waiters: Array<{ re: RegExp; resolve: (m: string) => void }> = [];
   const onChunk = (chunk: Buffer): void => {
-    buffer += chunk.toString('utf8');
+    state.buffer += chunk.toString('utf8');
     for (let i = waiters.length - 1; i >= 0; i--) {
-      if (waiters[i]!.re.test(buffer)) {
-        waiters[i]!.resolve(buffer);
+      if (waiters[i]!.re.test(state.buffer)) {
+        waiters[i]!.resolve(state.buffer);
         waiters.splice(i, 1);
       }
     }
@@ -158,7 +158,7 @@ function buildSpawnedPeer(
   proc.stdout.on('data', onChunk);
   proc.stderr.on('data', onChunk);
 
-  return makeSpawnedHandlers(proc, opts, buffer, waiters);
+  return makeSpawnedHandlers(proc, opts, state, waiters);
 }
 
 /**
@@ -171,23 +171,23 @@ function makeSpawnedHandlers(
     home: string;
     handle: string;
   },
-  buffer: string,
+  state: { buffer: string },
   waiters: Array<{ re: RegExp; resolve: (m: string) => void }>,
 ): SpawnedPeer {
   return {
     proc,
     home: opts.home,
     handle: opts.handle,
-    text: () => buffer,
+    text: () => state.buffer,
     waitFor: (pattern, timeoutMs = 30_000) =>
       new Promise<string>((resolve, reject) => {
-        if (pattern.test(buffer)) return resolve(buffer);
+        if (pattern.test(state.buffer)) return resolve(state.buffer);
         const timer = setTimeout(() => {
           const idx = waiters.findIndex((w) => w.re === pattern);
           if (idx >= 0) waiters.splice(idx, 1);
           reject(
             new Error(
-              `[${opts.handle}] timed out after ${timeoutMs}ms waiting for ${pattern}\n--- output ---\n${buffer}`,
+              `[${opts.handle}] timed out after ${timeoutMs}ms waiting for ${pattern}\n--- output ---\n${state.buffer}`,
             ),
           );
         }, timeoutMs);
