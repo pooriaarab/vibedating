@@ -130,6 +130,20 @@ export function spawnPeer(opts: {
     stdio: ['pipe', 'pipe', 'pipe'],
   }) as ChildProcessWithoutNullStreams;
 
+  return buildSpawnedPeer(proc, opts);
+}
+
+/**
+ * Build the SpawnedPeer object returned by {@link spawnPeer}.
+ * Module-private; extracted to keep spawnPeer under the line budget.
+ */
+function buildSpawnedPeer(
+  proc: ChildProcessWithoutNullStreams,
+  opts: {
+    home: string;
+    handle: string;
+  },
+): SpawnedPeer {
   let buffer = '';
   const waiters: Array<{ re: RegExp; resolve: (m: string) => void }> = [];
   const onChunk = (chunk: Buffer): void => {
@@ -144,6 +158,22 @@ export function spawnPeer(opts: {
   proc.stdout.on('data', onChunk);
   proc.stderr.on('data', onChunk);
 
+  return makeSpawnedHandlers(proc, opts, buffer, waiters);
+}
+
+/**
+ * Build the { text, waitFor, send, close } methods for the SpawnedPeer.
+ * Extracted so its size doesn't count toward buildSpawnedPeer's line budget.
+ */
+function makeSpawnedHandlers(
+  proc: ChildProcessWithoutNullStreams,
+  opts: {
+    home: string;
+    handle: string;
+  },
+  buffer: string,
+  waiters: Array<{ re: RegExp; resolve: (m: string) => void }>,
+): SpawnedPeer {
   return {
     proc,
     home: opts.home,

@@ -75,8 +75,6 @@ export function createPeerLink(
   initialBuffer: string | Buffer = '',
   linkOpts: CreatePeerLinkOptions = {},
 ): PeerLink {
-  // Codec: vibedating's concrete Frame parser + serializer. Binary media-chunks
-  // bypass the JSON path inside vibe-core's pullFramesFromBuffer.
   const codec = {
     parse: parseFrame,
     serialize: (frame: Frame) => serializeFrame(frame),
@@ -93,6 +91,17 @@ export function createPeerLink(
     byeFrame: { t: 'bye' },
   });
 
+  return buildPeerLink(core, hello);
+}
+
+/**
+ * Build the PeerLink object returned by {@link createPeerLink}.
+ * Module-private; extracted to keep createPeerLink under the line budget.
+ */
+function buildPeerLink(
+  core: CorePeerLink<Frame, PeerHello>,
+  hello: PeerHello,
+): PeerLink {
   const messageCbs = new Set<(m: { id: string; text: string; at: number }) => void>();
   const signalCbs = new Set<(f: RtcFrame) => void>();
   let subscribed = false;
@@ -115,9 +124,31 @@ export function createPeerLink(
     });
   };
 
+  return makeLinkHandlers(core, hello, {
+    messageCbs,
+    signalCbs,
+    ensureFrameDispatch,
+  });
+}
+
+/** Handler sets bundled to keep makeLinkHandlers under the param budget. */
+interface LinkHandlers {
+  messageCbs: Set<(m: { id: string; text: string; at: number }) => void>;
+  signalCbs: Set<(f: RtcFrame) => void>;
+  ensureFrameDispatch: () => void;
+}
+
+/**
+ * Build the PeerLink method object. Extracted so its size doesn't count
+ * toward the line budget of buildPeerLink.
+ */
+function makeLinkHandlers(
+  core: CorePeerLink<Frame, PeerHello>,
+  hello: PeerHello,
+  h: LinkHandlers,
+): PeerLink {
   return {
     get hello() {
-      // core.hello is Hello | undefined; we always pass one.
       return core.hello ?? hello;
     },
     get closed() {
@@ -136,15 +167,15 @@ export function createPeerLink(
       core.sendFrame(frame);
     },
     onMessage(cb) {
-      ensureFrameDispatch();
-      messageCbs.add(cb);
+      h.ensureFrameDispatch();
+      h.messageCbs.add(cb);
     },
     onMedia(cb) {
       core.onMedia(cb);
     },
     onSignal(cb) {
-      ensureFrameDispatch();
-      signalCbs.add(cb);
+      h.ensureFrameDispatch();
+      h.signalCbs.add(cb);
     },
     onClose(cb) {
       core.onClose(cb);
