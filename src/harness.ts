@@ -130,13 +130,27 @@ export function spawnPeer(opts: {
     stdio: ['pipe', 'pipe', 'pipe'],
   }) as ChildProcessWithoutNullStreams;
 
-  let buffer = '';
+  return buildSpawnedPeer(proc, opts);
+}
+
+/**
+ * Build the SpawnedPeer object returned by {@link spawnPeer}.
+ * Module-private; extracted to keep spawnPeer under the line budget.
+ */
+function buildSpawnedPeer(
+  proc: ChildProcessWithoutNullStreams,
+  opts: {
+    home: string;
+    handle: string;
+  },
+): SpawnedPeer {
+  const state = { buffer: '' };
   const waiters: Array<{ re: RegExp; resolve: (m: string) => void }> = [];
   const onChunk = (chunk: Buffer): void => {
-    buffer += chunk.toString('utf8');
+    state.buffer += chunk.toString('utf8');
     for (let i = waiters.length - 1; i >= 0; i--) {
-      if (waiters[i]!.re.test(buffer)) {
-        waiters[i]!.resolve(buffer);
+      if (waiters[i]!.re.test(state.buffer)) {
+        waiters[i]!.resolve(state.buffer);
         waiters.splice(i, 1);
       }
     }
@@ -144,20 +158,36 @@ export function spawnPeer(opts: {
   proc.stdout.on('data', onChunk);
   proc.stderr.on('data', onChunk);
 
+  return makeSpawnedHandlers(proc, opts, state, waiters);
+}
+
+/**
+ * Build the { text, waitFor, send, close } methods for the SpawnedPeer.
+ * Extracted so its size doesn't count toward buildSpawnedPeer's line budget.
+ */
+function makeSpawnedHandlers(
+  proc: ChildProcessWithoutNullStreams,
+  opts: {
+    home: string;
+    handle: string;
+  },
+  state: { buffer: string },
+  waiters: Array<{ re: RegExp; resolve: (m: string) => void }>,
+): SpawnedPeer {
   return {
     proc,
     home: opts.home,
     handle: opts.handle,
-    text: () => buffer,
+    text: () => state.buffer,
     waitFor: (pattern, timeoutMs = 30_000) =>
       new Promise<string>((resolve, reject) => {
-        if (pattern.test(buffer)) return resolve(buffer);
+        if (pattern.test(state.buffer)) return resolve(state.buffer);
         const timer = setTimeout(() => {
           const idx = waiters.findIndex((w) => w.re === pattern);
           if (idx >= 0) waiters.splice(idx, 1);
           reject(
             new Error(
-              `[${opts.handle}] timed out after ${timeoutMs}ms waiting for ${pattern}\n--- output ---\n${buffer}`,
+              `[${opts.handle}] timed out after ${timeoutMs}ms waiting for ${pattern}\n--- output ---\n${state.buffer}`,
             ),
           );
         }, timeoutMs);
