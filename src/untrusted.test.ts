@@ -1,8 +1,8 @@
 import { describe, expect, it } from 'vitest';
+import { MAX_DISPLAY_TEXT_LEN, sanitizePeerText } from '@pooriaarab/vibe-core/untrusted';
 import { MAX_TEXT_LEN } from './frame.js';
-import { MAX_DISPLAY_TEXT_LEN, sanitizePeerText } from './untrusted.js';
 
-describe('sanitizePeerText() — AEGIS-lite untrusted display data', () => {
+describe('sanitizePeerText() — input-safety untrusted display data', () => {
   it('passes ordinary text through untouched', () => {
     expect(sanitizePeerText('hey, nice league!')).toBe('hey, nice league!');
     expect(sanitizePeerText('caf\u00e9 \u00fcber')).toBe('caf\u00e9 \u00fcber');

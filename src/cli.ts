@@ -38,8 +38,7 @@ import {
 import { ROOM_TOPIC_PREFIX, startRoom, type RoomSession } from './room.js';
 import { loadOrCreateIdentity, loadOrCreateNostrKey, signHelloClaims } from './identity.js';
 import { createNostrPoolTransport, createNostrRelayLink } from './relay.js';
-import { ensureHandle } from './handlegen.js';
-import { sanitizePeerText } from './untrusted.js';
+import { sanitizePeerText } from '@pooriaarab/vibe-core/untrusted';
 import {
   daemonStatus,
   installDaemonService,
@@ -55,6 +54,7 @@ import {
   canShareLive,
   connectProfile,
   defaultStateDir,
+  ensureHandle,
   grantLiveConsent,
   isBlocked,
   loadBlocklist,
@@ -70,7 +70,7 @@ import { createLiveBridge, createRoomBridge, startServer, type LiveBridge, type 
 import { runMcp } from './mcp.js';
 
 /** Mirrors package.json version (kept here; package.json imports are brittle under bundling). */
-const VERSION = '0.8.0';
+const VERSION = '0.9.0';
 
 /** Recognized top-level commands, plus the synthetic help/version. */
 export type Command =
@@ -561,7 +561,8 @@ async function cmdDiscover(live: boolean, any: boolean, viaRelay: boolean): Prom
   return 0;
 }
 
-async function cmdOpen(port: number | undefined, any: boolean, room: string | undefined): Promise<number> {
+async function cmdOpen(opts: { port: number | undefined; any: boolean; room: string | undefined; viaRelay: boolean; to: string | undefined }): Promise<number> {
+  const { port, any, room, viaRelay, to } = opts;
   // Attach a live-signaling bridge IF the user has connected a profile, so the
   // web app can reach real peers. `open` is treated as the live opt-in exactly
   // like `live` / `discover --live` (the command invocation grants consent), and
@@ -609,20 +610,47 @@ async function cmdOpen(port: number | undefined, any: boolean, room: string | un
           /* offline / DHT unreachable — web app still works, room just has no members yet */
         });
     } else if (live) {
-      const { topics, acceptLeague } = discoveryScope(profile.league, any);
-      void startDiscovery({
-        hello,
-        topics,
-        acceptLeague,
-        isBlocked: blockedChecker(),
-        onLink: (link) => live!.addLink(link),
-      })
-        .then((s) => {
-          session = s;
+      if (viaRelay && to !== undefined) {
+        const target = normalizeHandle(to);
+        const peer = target ? loadPeers().find((p) => sameHandle(p.handle, target) && typeof p.pubkey === 'string') : undefined;
+        if (peer && peer.pubkey) {
+          const peerPubkey = peer.pubkey;
+          void (async () => {
+            try {
+              const myNostr = await loadOrCreateNostrKey();
+              const transport = await createNostrPoolTransport();
+              const identity = loadOrCreateIdentity();
+              const link = await createNostrRelayLink({
+                myNostr,
+                myEd25519Hex: identity.publicKeyHex,
+                peerEd25519Hex: peerPubkey,
+                hello: peer,
+                transport,
+              });
+              live!.addLink(link);
+            } catch {
+              /* offline or relay unavailable */
+            }
+          })();
+        } else {
+          process.stderr.write(`\n  warning: --via-relay peer ${to} not found or lacks identity pubkey.\n`);
+        }
+      } else {
+        const { topics, acceptLeague } = discoveryScope(profile.league, any);
+        void startDiscovery({
+          hello,
+          topics,
+          acceptLeague,
+          isBlocked: blockedChecker(),
+          onLink: (link) => live!.addLink(link),
         })
-        .catch(() => {
-          /* offline / DHT unreachable — web app still works, live just has no peers yet */
-        });
+          .then((s) => {
+            session = s;
+          })
+          .catch(() => {
+            /* offline / DHT unreachable — web app still works, live just has no peers yet */
+          });
+      }
     }
   }
   process.stdout.write(`\n  vibedating local web app → ${started.url}\n`);
@@ -662,6 +690,17 @@ async function cmdOpen(port: number | undefined, any: boolean, room: string | un
  */
 export function shouldKeepAlive(flag: boolean, stdinIsTTY: boolean | undefined): boolean {
   return flag || stdinIsTTY !== true;
+}
+
+export function parseSendCommand(text: string): { path: string } | { error: 'missing_path' } | null {
+  const parts = text.split(' ');
+  const cmd = parts[0];
+  if (cmd === '/send' || cmd === '/file' || cmd === '/image') {
+    const path = text.slice(cmd.length).trim();
+    if (!path) return { error: 'missing_path' };
+    return { path };
+  }
+  return null;
 }
 
 /**
@@ -726,10 +765,15 @@ async function cmdLiveViaRelay(profile: ProfileState, to: string | undefined): P
     process.stdout.write(
       `  · relayed to ${sanitizePeerText(l.hello.handle)} (${l.hello.league}${qual} · ${l.hello.harness}) ${usageMark(l.hello)}${idMark(l.hello)}\n`,
     );
-    l.onMessage((m) => {
-      // AEGIS-lite: chat text is UNTRUSTED display data — sanitized before print.
-      process.stdout.write(`  <${sanitizePeerText(l.hello.handle)}> ${sanitizePeerText(m.text)}\n`);
-    });
+  });
+  pairing.onMessage((from, m) => {
+    // input-safety: chat text is UNTRUSTED display data — sanitized before print.
+    process.stdout.write(`  <${sanitizePeerText(from)}> ${sanitizePeerText(m.text)}\n`);
+  });
+  pairing.onQueued((from, n) => {
+    process.stdout.write(
+      `  · ${sanitizePeerText(from)} sent a message (${n} queued) — /open ${sanitizePeerText(from)} to read\n`,
+    );
   });
   pairing.add(link);
 
@@ -784,13 +828,8 @@ async function cmdLiveViaRelay(profile: ProfileState, to: string | undefined): P
  * protocol + pairing policy are unit tested; this readline loop is manual-smoke
  * only.
  */
-async function cmdLive(
-  dating: boolean,
-  any: boolean,
-  to: string | undefined,
-  keepAlive: boolean,
-  viaRelay: boolean,
-): Promise<number> {
+async function cmdLive(opts: { dating: boolean; any: boolean; to: string | undefined; keepAlive: boolean; viaRelay: boolean }): Promise<number> {
+  const { dating, any, to, keepAlive, viaRelay } = opts;
   const profile = loadProfile();
   if (!profile) {
     process.stderr.write('Not connected yet. Run `vibedating connect` first.\n');
@@ -832,15 +871,20 @@ async function cmdLive(
       return;
     }
     const { qual } = peerDirection(profile.league, link.hello.league);
-    // AEGIS-lite: the handle is wire data — display-sanitized, never trusted.
+    // input-safety: the handle is wire data — display-sanitized, never trusted.
     process.stdout.write(
       `  · matched ${sanitizePeerText(link.hello.handle)} (${link.hello.league}${qual} · ${link.hello.harness}) ${usageMark(link.hello)}${idMark(link.hello)}\n`,
     );
-    link.onMessage((m) => {
-      // AEGIS-lite: chat text is UNTRUSTED display data — never executed, never
-      // passed to a shell/agent; control/bidi chars stripped before printing.
-      process.stdout.write(`  <${sanitizePeerText(link.hello.handle)}> ${sanitizePeerText(m.text)}\n`);
-    });
+  });
+  pairing.onMessage((from, m) => {
+    // input-safety: chat text is UNTRUSTED display data — never executed, never
+    // passed to a shell/agent; control/bidi chars stripped before printing.
+    process.stdout.write(`  <${sanitizePeerText(from)}> ${sanitizePeerText(m.text)}\n`);
+  });
+  pairing.onQueued((from, n) => {
+    process.stdout.write(
+      `  · ${sanitizePeerText(from)} sent a message (${n} queued) — /open ${sanitizePeerText(from)} to read\n`,
+    );
   });
 
   const { topics, acceptLeague } = discoveryScope(profile.league, any);
@@ -864,6 +908,20 @@ async function cmdLive(
       if (target !== null) {
         process.stdout.write(`  ★ found ${sanitizePeerText(link.hello.handle)} — auto-opening\n`);
       }
+      // Bind media receipt ONCE per link (not in onMatch) — same discipline as
+      // onMessage: no handler accumulation, no drops. A received file is notable
+      // from any peer. input-safety: name is untrusted display data.
+      link.onMedia((m) => {
+        if (m.error) {
+          process.stdout.write(
+            `  📎 <${sanitizePeerText(link.hello.handle)}> sent ${sanitizePeerText(m.name)} — FAILED to save: ${m.error.message}\n`,
+          );
+        } else {
+          process.stdout.write(
+            `  📎 <${sanitizePeerText(link.hello.handle)}> sent ${sanitizePeerText(m.name)} — saved to ${m.path}\n`,
+          );
+        }
+      });
       pairing.add(link);
     },
   });
@@ -871,7 +929,7 @@ async function cmdLive(
     `  topic: ${TOPIC_PREFIX}${profile.league} → ${session.topic.toString('hex').slice(0, 12)}…` +
       `${topics.length > 1 ? ` (+${topics.length - 1} more)` : ''}\n`,
   );
-  process.stdout.write('  type to chat · /next · /open <handle> · /quit\n');
+  process.stdout.write('  type to chat · /send <path> · /next · /open <handle> · /quit\n');
   process.stdout.write('  video chat: live A/V runs in the web app — run `vibedating open`\n\n');
 
   // Read stdin line by line; slash-commands drive the pairing policy.
@@ -897,6 +955,26 @@ async function cmdLive(
       const handle = text.slice('/open '.length).trim();
       if (pairing.open(handle) === undefined) {
         process.stdout.write(`  · no available peer "${handle}"\n`);
+      }
+      continue;
+    }
+    const sendRes = parseSendCommand(text);
+    if (sendRes !== null) {
+      if ('error' in sendRes) {
+        process.stdout.write('  usage: /send <path>\n');
+        continue;
+      }
+      const cur = pairing.current();
+      if (cur === undefined) {
+        process.stdout.write('  · no peer yet — waiting for a match…\n');
+        continue;
+      }
+      try {
+        process.stdout.write(`  📎 sending ${sendRes.path}…\n`);
+        await cur.sendMedia(sendRes.path);
+        process.stdout.write('  ✓ sent\n');
+      } catch (err) {
+        process.stdout.write(`  ✗ failed to send media: ${err instanceof Error ? err.message : String(err)}\n`);
       }
       continue;
     }
@@ -984,7 +1062,7 @@ async function cmdRoom(name: string | undefined, keepAlive: boolean): Promise<nu
     process.stdout.write(`  · room (${members.length}): ${list}\n`);
   });
   session.onMessage((m) => {
-    // AEGIS-lite: chat text is UNTRUSTED display data — sanitized before print.
+    // input-safety: chat text is UNTRUSTED display data — sanitized before print.
     process.stdout.write(`  <${sanitizePeerText(m.from)}> ${sanitizePeerText(m.text)}\n`);
   });
   process.stdout.write(
@@ -1212,7 +1290,7 @@ async function cmdDaemonRun(any: boolean): Promise<number> {
     acceptLeague,
     isBlocked: blockedChecker(),
     onPeer: (peer, isNew) => {
-      // AEGIS-lite: the handle is untrusted wire data — sanitized so a hostile
+      // input-safety: the handle is untrusted wire data — sanitized so a hostile
       // peer can't forge log lines in daemon.log.
       process.stdout.write(
         `  [${new Date().toISOString()}] ${isNew ? 'NEW match' : 'peer seen'}: ${sanitizePeerText(peer.handle)} (${peer.league} · ${peer.harness})\n`,
@@ -1325,8 +1403,7 @@ Usage:
                                 --room <name> opens the room view instead: roster +
                                 group chat + full-mesh group video (~6 people; an SFU
                                 is the upgrade path for bigger rooms).
-  vibedating mcp                Run the stdio MCP server (full agent-native tool surface:
-                                profile/connect/matches/handle/block/discover/live_*/room_*/media)
+  vibedating mcp                Run the stdio MCP server (full agent-native tools: live/room/discover/media)
   vibedating --version
   vibedating --help
 
@@ -1377,9 +1454,9 @@ async function main(argv: readonly string[]): Promise<number> {
     case 'discover':
       return cmdDiscover(parsed.live, parsed.any, parsed.viaRelay);
     case 'open':
-      return cmdOpen(parsed.port, parsed.any, parsed.room);
+      return cmdOpen({ port: parsed.port, any: parsed.any, room: parsed.room, viaRelay: parsed.viaRelay, to: parsed.to });
     case 'live':
-      return cmdLive(parsed.dating, parsed.any, parsed.to, parsed.keepAlive, parsed.viaRelay);
+      return cmdLive({ dating: parsed.dating, any: parsed.any, to: parsed.to, keepAlive: parsed.keepAlive, viaRelay: parsed.viaRelay });
     case 'find':
       return cmdFind(parsed.arg, parsed.any);
     case 'room':

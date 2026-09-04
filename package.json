@@ -1,6 +1,6 @@
 {
   "name": "vibedate",
-  "version": "0.8.0",
+  "version": "0.9.0",
   "description": "Dating by tokens — matched by usage league across agentic CLIs. Raw usage stays local; only your league is shared. CLI + local web app + MCP. Local-first.",
   "type": "module",
   "license": "MIT",
@@ -8,7 +8,7 @@
   "bin": {
     "vibedate": "./dist/cli.js",
     "vibedating": "./dist/cli.js",
-    "vibedate-mcp": "./dist/mcp.js"
+    "vibedate-mcp": "./dist/mcp-bin.js"
   },
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
@@ -22,14 +22,16 @@
     "dist"
   ],
   "scripts": {
-    "build": "tsup src/index.ts src/cli.ts src/mcp.ts --format esm --dts --clean",
+    "build": "tsup src/index.ts src/cli.ts src/mcp.ts src/mcp-bin.ts --format esm --dts --clean",
     "typecheck": "tsc --noEmit",
-    "test": "vitest run",
-    "test:watch": "vitest"
+    "test": "vitest run --exclude '**/*.harness.test.ts'",
+    "test:watch": "vitest",
+    "bench": "tsx bench/run.ts",
+    "test:harness": "npm run build && vitest run harness.test"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.0.0",
-    "@pooriaarab/vibe-core": "^0.3.0",
+    "@pooriaarab/vibe-core": "^0.6.0",
     "hyperswarm": "^4.17.0",
     "nostr-tools": "^2.24.1"
   },
@@ -37,8 +39,9 @@
     "@types/node": "^20.11.0",
     "hyperdht": "^6.33.0",
     "tsup": "^8.0.0",
+    "tsx": "^4.23.1",
     "typescript": "^5.4.0",
-    "vitest": "^1.6.0",
+    "vitest": "^5.0.0",
     "werift": "^0.24.1"
   },
   "homepage": "https://github.com/pooriaarab/vibedating#readme",
@@ -65,5 +68,6 @@
   },
   "engines": {
     "node": ">=18"
-  }
+  },
+  "mcpName": "io.github.pooriaarab/vibedate"
 }

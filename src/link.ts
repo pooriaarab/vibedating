@@ -1,36 +1,32 @@
 /**
  * PeerLink — one live peer connection, framed.
  *
- * Wraps the hyperswarm `socket` (a Duplex) behind a tiny chat surface:
- *   - {@link PeerLink.send} writes a `msg` frame,
- *   - {@link PeerLink.onMessage} receives every `msg` frame the peer sends,
- *   - {@link PeerLink.onClose} fires when the peer hangs up (a `bye` frame,
- *     or the socket ending),
- *   - {@link PeerLink.close} is the omegle "next": writes `bye`, then ends.
- *   - {@link PeerLink.sendMedia} / {@link PeerLink.onMedia} move chunked files,
- *   - {@link PeerLink.sendSignal} / {@link PeerLink.onSignal} relay the three
- *     `rtc-*` WebRTC signaling frames (offer / answer / ice). Live A/V itself
- *     runs in the browser; these only ferry signaling over the P2P socket.
+ * MECHANISM lives in `@pooriaarab/vibe-core/link` (generic Duplex + injected
+ * frame codec). This module is the vibedating POLICY wrapper: it wires the
+ * concrete frame codec from `./frame.js`, maps the chat / signal / media
+ * surface (`send` / `onMessage` / `sendSignal` / `onSignal`) onto the generic
+ * `sendFrame` / `onFrame` API, and keeps the historical `createPeerLink(socket,
+ * hello, initialBuffer, opts)` call signature so discovery + tests stay put.
  *
- * Everything on the wire goes through {@link parseFrame}'s allowlist, so a peer
- * can never smuggle extra fields onto a `msg` (and thus never a raw-usage field).
- * The same allowlist guards every `media-*` frame, so the file-transfer path
- * inherits the exact same invariant.
- *
- * The hello handshake has already happened by the time a link exists —
- * `hello` is the validated peer identity, captured at construction. The
- * connection handler may hand any leftover bytes (after the hello line) in
- * `initialBuffer` so frames sent immediately after hello are not lost.
+ * Hyperswarm discovery stays in `./p2p.js` and injects its socket here.
  */
 import { randomUUID } from 'node:crypto';
 import type { Duplex } from 'node:stream';
-import { parseFrame, serializeFrame, type Frame, type MediaFrame, type RtcFrame } from './frame.js';
 import {
-  MediaReceiver,
-  type ReceivedMedia,
-  sendMediaFile,
-} from './media.js';
+  createPeerLink as coreCreatePeerLink,
+  type PeerLink as CorePeerLink,
+} from '@pooriaarab/vibe-core/link';
+import type { ReceivedMedia } from '@pooriaarab/vibe-core/media';
+import {
+  parseFrame,
+  serializeFrame,
+  type Frame,
+  type MediaFrame,
+  type RtcFrame,
+} from './frame.js';
 import type { PeerHello } from './p2p.js';
+
+export type { ReceivedMedia };
 
 /** Options for {@link createPeerLink}. */
 export interface CreatePeerLinkOptions {
@@ -41,6 +37,8 @@ export interface CreatePeerLinkOptions {
 export interface PeerLink {
   /** The validated identity of the remote peer (from the hello handshake). */
   readonly hello: PeerHello;
+  /** Whether the link has been closed. */
+  readonly closed: boolean;
   /** Send a line of text as a `msg` frame. */
   send(text: string): void;
   /** Read a file from disk and send it as a chunked media transfer. */
@@ -64,153 +62,129 @@ export interface PeerLink {
 }
 
 /**
- * Build a {@link PeerLink} over `socket`. `initialBuffer` carries any bytes the
- * caller already buffered after the hello line (so frames sent right after the
- * hello are not dropped). Pure-ish: attaches listeners to `socket`.
+ * Build a vibedating {@link PeerLink} over `socket`. `initialBuffer` carries any
+ * bytes the caller already buffered after the hello line (so frames sent right
+ * after the hello are not dropped). Pure-ish: attaches listeners to `socket`.
+ *
+ * `initialBuffer` may be a utf8 string (legacy handshake leftover of JSON
+ * control frames) or a raw Buffer (preferred once binary chunks can appear).
  */
 export function createPeerLink(
   socket: Duplex,
   hello: PeerHello,
-  initialBuffer = '',
+  initialBuffer: string | Buffer = '',
   linkOpts: CreatePeerLinkOptions = {},
 ): PeerLink {
-  const messageCbs = new Set<(m: { id: string; text: string; at: number }) => void>();
-  const mediaCbs = new Set<(m: ReceivedMedia) => void>();
-  const signalCbs = new Set<(f: RtcFrame) => void>();
-  const closeCbs = new Set<() => void>();
-  let buf = initialBuffer;
-  let closed = false;
-
-  // Lazily created on the first onMedia() registration so a link that nobody
-  // listens for media on never touches the disk (media frames are then just
-  // dropped, like 'typing').
-  let mediaReceiver: MediaReceiver | undefined;
-  const ensureMediaReceiver = (): MediaReceiver => {
-    if (!mediaReceiver) {
-      mediaReceiver = new MediaReceiver(
-        (m) => {
-          for (const cb of mediaCbs) cb(m);
-        },
-        { tmpDir: linkOpts.mediaTmpDir },
-      );
-    }
-    return mediaReceiver;
+  // Codec: vibedating's concrete Frame parser + serializer. Binary media-chunks
+  // bypass the JSON path inside vibe-core's pullFramesFromBuffer.
+  const codec = {
+    parse: parseFrame,
+    serialize: (frame: Frame) => serializeFrame(frame),
   };
 
-  const dispatch = (frame: Frame): void => {
-    switch (frame.t) {
-      case 'msg': {
+  const core: CorePeerLink<Frame, PeerHello> = coreCreatePeerLink(socket, {
+    codec,
+    hello,
+    initialBuffer,
+    mediaTmpDir: linkOpts.mediaTmpDir,
+    isBye: (f) => f.t === 'bye',
+    isMedia: (f) =>
+      f.t === 'media-start' || f.t === 'media-chunk' || f.t === 'media-end',
+    byeFrame: { t: 'bye' },
+  });
+
+  return buildPeerLink(core, hello);
+}
+
+/**
+ * Build the PeerLink object returned by {@link createPeerLink}.
+ * Module-private; extracted to keep createPeerLink under the line budget.
+ */
+function buildPeerLink(
+  core: CorePeerLink<Frame, PeerHello>,
+  hello: PeerHello,
+): PeerLink {
+  const messageCbs = new Set<(m: { id: string; text: string; at: number }) => void>();
+  const signalCbs = new Set<(f: RtcFrame) => void>();
+  let subscribed = false;
+  const ensureFrameDispatch = (): void => {
+    if (subscribed) return;
+    subscribed = true;
+    core.onFrame((frame) => {
+      if (frame.t === 'msg') {
         const m = { id: frame.id, text: frame.text, at: frame.at };
         for (const cb of messageCbs) cb(m);
-        break;
+        return;
       }
-      case 'media-start':
-      case 'media-chunk':
-      case 'media-end': {
-        mediaReceiver?.handle(frame as MediaFrame);
-        break;
-      }
-      case 'rtc-offer':
-      case 'rtc-answer':
-      case 'rtc-ice': {
+      if (frame.t === 'rtc-offer' || frame.t === 'rtc-answer' || frame.t === 'rtc-ice') {
         const f = frame as RtcFrame;
         for (const cb of signalCbs) cb(f);
-        break;
       }
-      case 'bye': {
-        if (!closed) {
-          closed = true;
-          for (const cb of closeCbs) cb();
-        }
-        break;
-      }
-      // 'hello' / 'typing' have no meaning at the link layer — hello already
-      // happened; typing is a future affordance. Ignore silently.
-      default:
-        break;
-    }
+      // media-* is consumed by core's MediaReceiver when onMedia is registered;
+      // bye / typing / hello have no message/signal fans here.
+      void (frame as MediaFrame | Frame);
+    });
   };
 
-  const pump = (): void => {
-    let nl: number;
-    while ((nl = buf.indexOf('\n')) >= 0) {
-      const line = buf.slice(0, nl);
-      buf = buf.slice(nl + 1);
-      if (line.trim() === '') continue;
-      const frame = parseFrame(line);
-      if (frame === null) continue; // malformed/unknown frame — drop, never crash
-      dispatch(frame);
-    }
-  };
+  return makeLinkHandlers(core, hello, {
+    messageCbs,
+    signalCbs,
+    ensureFrameDispatch,
+  });
+}
 
-  // Replay any leftover bytes the connection handler already had buffered.
-  pump();
+/** Handler sets bundled to keep makeLinkHandlers under the param budget. */
+interface LinkHandlers {
+  messageCbs: Set<(m: { id: string; text: string; at: number }) => void>;
+  signalCbs: Set<(f: RtcFrame) => void>;
+  ensureFrameDispatch: () => void;
+}
 
-  socket.on('data', (chunk: Buffer) => {
-    buf += chunk.toString('utf8');
-    pump();
-  });
-  socket.on('end', () => {
-    if (!closed) {
-      closed = true;
-      for (const cb of closeCbs) cb();
-    }
-  });
-  socket.on('close', () => {
-    if (!closed) {
-      closed = true;
-      for (const cb of closeCbs) cb();
-    }
-  });
-  socket.on('error', () => {
-    // Peer vanished — surface as a close so callers stop waiting. Never throw.
-    if (!closed) {
-      closed = true;
-      for (const cb of closeCbs) cb();
-    }
-  });
-
+/**
+ * Build the PeerLink method object. Extracted so its size doesn't count
+ * toward the line budget of buildPeerLink.
+ */
+function makeLinkHandlers(
+  core: CorePeerLink<Frame, PeerHello>,
+  hello: PeerHello,
+  h: LinkHandlers,
+): PeerLink {
   return {
-    hello,
+    get hello() {
+      // core.hello is Hello | undefined; we always pass one.
+      return core.hello ?? hello;
+    },
+    get closed() {
+      return core.closed;
+    },
     send(text) {
-      if (closed) return;
+      if (core.closed) return;
       const frame: Frame = { t: 'msg', id: randomUUID(), text, at: Date.now() };
-      socket.write(serializeFrame(frame) + '\n');
+      core.sendFrame(frame);
     },
     async sendMedia(filePath, opts = {}) {
-      if (closed) return { id: '', size: 0 };
-      return sendMediaFile({ socket, path: filePath, mime: opts.mime, name: opts.name });
+      return core.sendMedia(filePath, opts);
     },
     sendSignal(frame) {
-      if (closed) return;
-      socket.write(serializeFrame(frame) + '\n');
+      if (core.closed) return;
+      core.sendFrame(frame);
     },
     onMessage(cb) {
-      messageCbs.add(cb);
+      h.ensureFrameDispatch();
+      h.messageCbs.add(cb);
     },
     onMedia(cb) {
-      ensureMediaReceiver();
-      mediaCbs.add(cb);
+      core.onMedia(cb);
     },
     onSignal(cb) {
-      signalCbs.add(cb);
+      h.ensureFrameDispatch();
+      h.signalCbs.add(cb);
     },
     onClose(cb) {
-      closeCbs.add(cb);
+      core.onClose(cb);
     },
     close() {
-      if (closed) return;
-      closed = true; // a locally-initiated close does NOT re-fire our own onClose
-      try {
-        socket.write(serializeFrame({ t: 'bye' }) + '\n');
-      } catch {
-        /* socket already gone — nothing more to do */
-      }
-      try {
-        socket.end();
-      } catch {
-        /* already ended */
-      }
+      core.close();
     },
   };
 }

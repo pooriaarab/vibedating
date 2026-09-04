@@ -23,6 +23,9 @@
  */
 import http, { type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import { randomUUID } from 'node:crypto';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import { makeEvent, notify as vibeCoreNotify } from '@pooriaarab/vibe-core';
 import type { VibeEvent } from '@pooriaarab/vibe-core';
 import type { Candidate } from './index.js';
@@ -31,8 +34,9 @@ import { parseFrame, type RtcFrame } from './frame.js';
 import type { PeerLink } from './link.js';
 import type { RoomMessage, RoomSession } from './room.js';
 import { connectProfile, loadProfile, type ProfileState } from './state.js';
-import { sanitizePeerText } from './untrusted.js';
+import { sanitizePeerText } from '@pooriaarab/vibe-core/untrusted';
 import { webAppHtml } from './web-app-html.js';
+import type { ReceivedMedia } from '@pooriaarab/vibe-core/media';
 
 /** Sink for milestone notifications. Injectable so tests can capture events. */
 export type NotifySink = (event: VibeEvent) => void;
@@ -92,6 +96,10 @@ export interface LiveBridge {
   /** Long-poll for the next incoming text message from `handle`. Resolves with
    *  the message, or null on timeout / when the peer is unknown. */
   pollMessage(handle: string, timeoutMs: number): Promise<LiveMessage | null>;
+  /** Send media to the peer identified by `handle`. */
+  sendMedia(handle: string, path: string): Promise<void>;
+  /** Long-poll for incoming media from `handle`. */
+  pollMedia(handle: string, timeoutMs: number): Promise<{ name: string; mime: string; dataB64: string } | null>;
 }
 
 interface PeerMailbox {
@@ -100,6 +108,8 @@ interface PeerMailbox {
   readonly incoming: RtcFrame[];
   /** Incoming text messages from this peer, drained by the browser long-poll. */
   readonly messages: LiveMessage[];
+  /** Incoming media from this peer. */
+  readonly media: ReceivedMedia[];
 }
 
 /**
@@ -132,7 +142,7 @@ export function createLiveBridge(): LiveBridge {
     },
     addLink(link) {
       const handle = link.hello.handle;
-      boxes.set(handle, { link, incoming: [], messages: [] });
+      boxes.set(handle, { link, incoming: [], messages: [], media: [] });
       // Route every rtc-* frame the peer sends into this peer's mailbox.
       link.onSignal((f) => {
         const mb = boxes.get(handle);
@@ -142,12 +152,25 @@ export function createLiveBridge(): LiveBridge {
       link.onMessage((m) => {
         const mb = boxes.get(handle);
         if (!mb) return;
-        // AEGIS-lite: peer text is UNTRUSTED display data — never executed,
+        // input-safety: peer text is UNTRUSTED display data — never executed,
         // never passed to a shell/agent; sanitized at ingress (the web app
         // renders via textContent too — defense in depth).
         mb.messages.push({ ...m, text: sanitizePeerText(m.text) });
         if (mb.messages.length > MAX_QUEUED_MESSAGES) {
           mb.messages.splice(0, mb.messages.length - MAX_QUEUED_MESSAGES);
+        }
+      });
+      link.onMedia((m) => {
+        const mb = boxes.get(handle);
+        if (!mb) {
+          if (!m.error) fs.unlink(m.path, () => {}); // cleanup if peer gone
+          return;
+        }
+        if (m.error) return; // Ignore failed transfers
+        mb.media.push({ ...m, name: sanitizePeerText(m.name), mime: sanitizePeerText(m.mime) });
+        if (mb.media.length > MAX_QUEUED_MESSAGES) {
+          const dropped = mb.media.splice(0, mb.media.length - MAX_QUEUED_MESSAGES);
+          for (const d of dropped) fs.unlink(d.path, () => {});
         }
       });
       link.onClose(() => {
@@ -188,6 +211,38 @@ export function createLiveBridge(): LiveBridge {
         if (cur.messages.length > 0) return cur.messages.shift() ?? null;
       }
       return null;
+    },
+    async sendMedia(handle, filePath) {
+      const mb = boxes.get(handle);
+      if (!mb) throw new Error('Peer not found');
+      await mb.link.sendMedia(filePath);
+    },
+    async pollMedia(handle, timeoutMs) {
+      const mb = boxes.get(handle);
+      if (!mb) return null;
+      let targetMedia: ReceivedMedia | null = null;
+      if (mb.media.length > 0) {
+        targetMedia = mb.media.shift() ?? null;
+      } else {
+        const deadline = Date.now() + timeoutMs;
+        while (Date.now() < deadline) {
+          await new Promise((r) => setTimeout(r, 100));
+          const cur = boxes.get(handle);
+          if (!cur) return null; // peer vanished mid-poll
+          if (cur.media.length > 0) {
+            targetMedia = cur.media.shift() ?? null;
+            break;
+          }
+        }
+      }
+      if (!targetMedia) return null;
+      try {
+        const buf = await fs.promises.readFile(targetMedia.path);
+        await fs.promises.unlink(targetMedia.path).catch(() => {});
+        return { name: targetMedia.name, mime: targetMedia.mime, dataB64: buf.toString('base64') };
+      } catch (err) {
+        return null;
+      }
     },
   };
   return bridge;
@@ -267,7 +322,7 @@ export function createRoomBridge(name: string): RoomBridge {
   const signalWaiters: Array<(s: RoomSignal | null) => void> = [];
 
   const drainMessage = (m: RoomMessage): void => {
-    // AEGIS-lite: peer text is UNTRUSTED display data — sanitized at ingress
+    // input-safety: peer text is UNTRUSTED display data — sanitized at ingress
     // (the web app renders via textContent too — defense in depth), mirroring
     // the LiveBridge.
     const safe: RoomMessage = { ...m, text: sanitizePeerText(m.text) };
@@ -431,10 +486,18 @@ function sendJson(res: ServerResponse, status: number, data: unknown): void {
   send(res, status, 'application/json; charset=utf-8', JSON.stringify(data));
 }
 
-function readBody(req: IncomingMessage): Promise<string> {
+function readBody(req: IncomingMessage, maxLength?: number): Promise<string> {
   return new Promise((resolve, reject) => {
     const chunks: Buffer[] = [];
-    req.on('data', (c: Buffer) => chunks.push(c));
+    let len = 0;
+    req.on('data', (c: Buffer) => {
+      chunks.push(c);
+      len += c.length;
+      if (maxLength !== undefined && len > maxLength) {
+        req.destroy();
+        reject(new Error('payload too large'));
+      }
+    });
     req.on('end', () => resolve(Buffer.concat(chunks).toString('utf8')));
     req.on('error', reject);
   });
@@ -469,7 +532,18 @@ async function handle(
   const pathname = url.pathname;
 
   if (req.method === 'GET' && pathname === '/') {
-    send(res, 200, 'text/html; charset=utf-8', webAppHtml);
+    const turnUrl = process.env['VIBEDATE_TURN_URL'];
+    let html = webAppHtml;
+    if (turnUrl) {
+      const turnUser = process.env['VIBEDATE_TURN_USER'];
+      const turnCred = process.env['VIBEDATE_TURN_CRED'];
+      const server: { urls: string; username?: string; credential?: string } = { urls: turnUrl };
+      if (turnUser) server.username = turnUser;
+      if (turnCred) server.credential = turnCred;
+      const script = `<script>window.__VIBE_ICE__={iceServers:${JSON.stringify([server]).replace(/</g, '\\u003c')}};</script>`;
+      html = html.replace('<script>', script + '\n<script>');
+    }
+    send(res, 200, 'text/html; charset=utf-8', html);
     return;
   }
 
@@ -677,6 +751,78 @@ async function handle(
       return;
     }
     live.sendMessage(handle, reParsed.text);
+    sendJson(res, 200, { ok: true });
+    return;
+  }
+
+  // GET /live/media?handle=<peerHandle>  — long-poll for the next incoming
+  // media file from that peer. Returns {media} (a media payload: name/mime/dataB64)
+  // or {media: null} on timeout. The browser runs one poll loop per peer.
+  if (req.method === 'GET' && pathname === '/live/media') {
+    const live = opts.live;
+    if (!live) {
+      sendJson(res, 200, { media: null, reason: 'live-not-attached' });
+      return;
+    }
+    const handle = url.searchParams.get('handle') ?? '';
+    if (handle === '') {
+      sendJson(res, 400, { error: 'missing handle' });
+      return;
+    }
+    const media = await live.pollMedia(handle, 25_000);
+    if (req.destroyed || res.writableEnded) return;
+    sendJson(res, 200, { media });
+    return;
+  }
+
+  // POST /live/media  {handle, name, mime, dataB64}  — relay one media file from the
+  // browser to the peer's PeerLink. Write to temp file and then send.
+  // 25MiB decoded max.
+  if (req.method === 'POST' && pathname === '/live/media') {
+    const live = opts.live;
+    if (!live) {
+      sendJson(res, 400, { error: 'live-not-attached' });
+      return;
+    }
+    let body: string;
+    try {
+      // Allow up to 35MB base64 JSON payload (which decodes to ~25MB bytes).
+      body = await readBody(req, 35 * 1024 * 1024);
+    } catch {
+      sendJson(res, 413, { error: 'payload too large' });
+      return;
+    }
+    let parsed: Record<string, unknown> = {};
+    try {
+      parsed = JSON.parse(body) as Record<string, unknown>;
+    } catch {
+      sendJson(res, 400, { error: 'invalid JSON body' });
+      return;
+    }
+    const handle = typeof parsed['handle'] === 'string' ? parsed['handle'] : '';
+    const name = typeof parsed['name'] === 'string' ? parsed['name'] : '';
+    const mime = typeof parsed['mime'] === 'string' ? parsed['mime'] : '';
+    const dataB64 = typeof parsed['dataB64'] === 'string' ? parsed['dataB64'] : '';
+    if (handle === '' || name === '' || mime === '' || dataB64 === '') {
+      sendJson(res, 400, { error: 'missing handle, name, mime, or dataB64' });
+      return;
+    }
+    const decoded = Buffer.from(dataB64, 'base64');
+    if (decoded.length > 25 * 1024 * 1024) {
+      sendJson(res, 413, { error: 'file exceeds 25MiB limit' });
+      return;
+    }
+    const tmpPath = path.join(os.tmpdir(), `vibe-media-send-${randomUUID()}`);
+    await fs.promises.writeFile(tmpPath, decoded);
+    try {
+      await live.sendMedia(handle, tmpPath);
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      sendJson(res, 500, { error: msg });
+      return;
+    } finally {
+      await fs.promises.unlink(tmpPath).catch(() => {});
+    }
     sendJson(res, 200, { ok: true });
     return;
   }

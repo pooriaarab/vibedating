@@ -30,7 +30,7 @@
 import { createHash } from 'node:crypto';
 import type { PeerLink } from './link.js';
 import type { RtcFrame } from './frame.js';
-import type { ReceivedMedia } from './media.js';
+import type { ReceivedMedia } from '@pooriaarab/vibe-core/media';
 import type { PeerHello } from './p2p.js';
 
 /* -------------------------------------------------------------------------- */
@@ -299,6 +299,17 @@ export async function createNostrRelayLink(
       // Receiving a decryptable message also pins the peer's pubkey, in case
       // their presence event never reached us on this relay.
       peerNostrPubkey = event.pubkey;
+
+      try {
+        const parsed = JSON.parse(plaintext);
+        if (parsed && typeof parsed === 'object' && '__vibe_rtc' in parsed) {
+          for (const cb of signalCbs) cb(parsed.__vibe_rtc as RtcFrame);
+          return;
+        }
+      } catch {
+        /* not JSON, or not our wrapper — fall through to plain text chat */
+      }
+
       const msg = { id: event.id, text: plaintext, at: event.created_at * 1000 };
       for (const cb of messageCbs) cb(msg);
       return;
@@ -311,6 +322,7 @@ export async function createNostrRelayLink(
 
   return {
     hello,
+    get closed() { return closed; },
     send(text) {
       if (closed) return;
       if (peerNostrPubkey === undefined) {
@@ -324,10 +336,14 @@ export async function createNostrRelayLink(
     async sendMedia() {
       return { id: '', size: 0 };
     },
-    // ponytail: relay WebRTC signaling (rtc-offer/answer/ice as kind-4 payloads)
-    // so A/V could also fall back through the relay. v0: text only.
-    sendSignal() {
-      /* no-op in v0 */
+    sendSignal(frame) {
+      if (closed) return;
+      const payload = JSON.stringify({ __vibe_rtc: frame });
+      if (peerNostrPubkey === undefined) {
+        pending.push(payload);
+        return;
+      }
+      sendEncrypted(payload, peerNostrPubkey);
     },
     onMessage(cb) {
       messageCbs.add(cb);

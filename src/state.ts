@@ -9,12 +9,20 @@
  * (scope {@link CONSENT_SCOPE}); it is granted on `connect` and revocable on
  * reset. Backed by a tiny JSON file next to the profile so it survives restarts.
  */
-import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, rmSync, renameSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { createConsentLedger } from '@pooriaarab/vibe-core';
 import type { ConsentGrant, ConsentLedger, ConsentStore, UsageSnapshot } from '@pooriaarab/vibe-core';
+import { generateHandle } from '@pooriaarab/vibe-core/handle';
 import { league } from './index.js';
+
+/** Atomically write a JSON object to a file to prevent partial reads by concurrent processes. */
+function writeJsonAtomic(filePath: string, obj: unknown): void {
+  const tmpPath = `${filePath}.tmp`;
+  writeFileSync(tmpPath, JSON.stringify(obj, null, 2) + '\n', 'utf8');
+  renameSync(tmpPath, filePath);
+}
 
 /** Consent scope covering "share my league bucket". Raw usage is never in scope. */
 export const CONSENT_SCOPE = 'share:league';
@@ -40,9 +48,15 @@ export interface ProfileState {
   readonly connectedAt: string;
 }
 
-/** Default directory for vibedating's local state: `~/.vibedating`. */
+/**
+ * Default directory for vibedating's local state: `~/.vibedating`, or the path
+ * in `VIBEDATE_HOME` when set. The override gives each process its own state
+ * (identity key, handle, consent) — required to run several real peers on one
+ * machine (multi-process test harness).
+ */
 export function defaultStateDir(): string {
-  return path.join(os.homedir(), '.vibedating');
+  const home = process.env['VIBEDATE_HOME'];
+  return home && home.length > 0 ? home : path.join(os.homedir(), '.vibedating');
 }
 
 /** A file-backed {@link ConsentStore}; survives across CLI/server/MCP processes. */
@@ -61,7 +75,7 @@ class FileConsentStore implements ConsentStore {
 
   save(grants: ConsentGrant[]): void {
     mkdirSync(path.dirname(this.file), { recursive: true });
-    writeFileSync(this.file, JSON.stringify({ grants }, null, 2) + '\n', 'utf8');
+    writeJsonAtomic(this.file, { grants });
   }
 }
 
@@ -96,7 +110,7 @@ export function connectProfile(
     connectedAt: new Date().toISOString(),
   };
   mkdirSync(dir, { recursive: true });
-  writeFileSync(profilePath(dir), JSON.stringify(state, null, 2) + '\n', 'utf8');
+  writeJsonAtomic(profilePath(dir), state);
   return state;
 }
 
@@ -215,15 +229,11 @@ export function saveHandle(handle: string, dir: string = defaultStateDir()): str
     );
   }
   mkdirSync(dir, { recursive: true });
-  writeFileSync(handleFilePath(dir), JSON.stringify({ handle: canonical }, null, 2) + '\n', 'utf8');
+  writeJsonAtomic(handleFilePath(dir), { handle: canonical });
   // Mirror onto an existing profile so live commands see the new handle at once.
   const existing = loadProfile(dir);
   if (existing !== null) {
-    writeFileSync(
-      profilePath(dir),
-      JSON.stringify({ ...existing, handle: canonical }, null, 2) + '\n',
-      'utf8',
-    );
+    writeJsonAtomic(profilePath(dir), { ...existing, handle: canonical });
   }
   return canonical;
 }
@@ -243,6 +253,32 @@ export function resolveHandle(dir: string = defaultStateDir()): string {
   return loadHandle(dir);
 }
 
+/** Outcome of {@link ensureHandle}: the effective handle + whether it was just minted. */
+export interface EnsuredHandle {
+  readonly handle: string;
+  /** True when a new handle was generated and persisted by this call. */
+  readonly generated: boolean;
+}
+
+/**
+ * Resolve the handle for a first-run flow, auto-assigning when unset:
+ *   1. a valid `VIBEDATING_HANDLE` env wins as a ONE-OFF (never persisted);
+ *   2. a persisted (non-default) handle is reused;
+ *   3. otherwise a memetic handle is generated (vibe-core/handle) and PERSISTED
+ *      — the bare default `@you` is never silently kept.
+ */
+export function ensureHandle(dir: string = defaultStateDir()): EnsuredHandle {
+  const env = process.env['VIBEDATING_HANDLE'];
+  if (env !== undefined && env.trim() !== '') {
+    const canonical = normalizeHandle(env);
+    if (canonical !== null) return { handle: canonical, generated: false };
+  }
+  const persisted = loadHandle(dir);
+  if (persisted !== DEFAULT_HANDLE) return { handle: persisted, generated: false };
+  const generated = generateHandle();
+  return { handle: saveHandle(generated, dir), generated: true };
+}
+
 /* -------------------------------------------------------------------------- */
 /* Blocklist                                                                  */
 /* -------------------------------------------------------------------------- */
@@ -256,7 +292,7 @@ function blocklistPath(dir: string): string {
 
 function persistBlocklist(blocked: readonly string[], dir: string): void {
   mkdirSync(dir, { recursive: true });
-  writeFileSync(blocklistPath(dir), JSON.stringify({ blocked }, null, 2) + '\n', 'utf8');
+  writeJsonAtomic(blocklistPath(dir), { blocked });
 }
 
 /** Load the persisted blocklist (canonical '@'-prefixed handles), or `[]`. */

@@ -23,13 +23,13 @@
  * allowlist are all inherited unchanged — a room member is just a discovered,
  * handshaken peer we happen to keep around instead of pairing one at a time.
  *
- * Privacy + AEGIS unchanged: rooms are consent-gated exactly like `live` (the
+ * Privacy + input-safety unchanged: rooms are consent-gated exactly like `live` (the
  * caller gates {@link startRoom} behind the `share:live` grant — see state.ts),
  * and peer text stays UNTRUSTED display data (the caller sanitizes before
  * printing). 1:1 modes are untouched — this module adds a new surface, it does
  * not alter the league/pairing path.
  */
-import { createHash } from 'node:crypto';
+import { topicFor } from '@pooriaarab/vibe-core/ids';
 import {
   startDiscovery,
   type DiscoverySession,
@@ -49,7 +49,7 @@ export const ROOM_TOPIC_PREFIX = 'vibedate-room:';
  * which is the entire discovery mechanism. Pure (mirrors {@link p2p.leagueTopic}).
  */
 export function roomTopic(name: string): Buffer {
-  return createHash('sha256').update(`${ROOM_TOPIC_PREFIX}${name}`, 'utf8').digest();
+  return topicFor(ROOM_TOPIC_PREFIX, name);
 }
 
 /** A room member = a connected, handshaken peer. Same shape as a live peer. */
@@ -119,6 +119,8 @@ interface MemberEntry {
   readonly link: PeerLink;
 }
 
+export const MAX_ROOM = 32;
+
 /**
  * Join (or create) a named room on the DHT and discover ALL members. CONSENT
  * GATE LIVES WITH THE CALLER — never call this without the `share:live` grant
@@ -157,10 +159,26 @@ export async function startRoom(opts: RoomOptions): Promise<RoomSession> {
     ...(opts.stateDir === undefined ? {} : { stateDir: opts.stateDir }),
     ...(opts.notify === undefined ? {} : { notify: opts.notify }),
     onLink: (link) => {
+      const isSelf =
+        link.hello.pubkey !== undefined && opts.hello.pubkey !== undefined
+          ? link.hello.pubkey === opts.hello.pubkey
+          : link.hello.handle === opts.hello.handle;
+      if (isSelf) {
+        link.close();
+        return;
+      }
+
       const handle = link.hello.handle;
-      // A reconnect may supersede a stale entry for the same handle — replace
-      // and re-fire the roster either way (join or rejoin look the same to
-      // observers).
+
+      if (!entries.has(handle) && entries.size >= MAX_ROOM) {
+        link.send(`Room is full (${MAX_ROOM} members max). Try again later.`);
+        link.close();
+        return;
+      }
+
+      const cur = entries.get(handle);
+      if (cur) cur.link.close();
+
       entries.set(handle, { hello: link.hello, link });
       memberHellos.set(handle, link.hello);
       fireRoster();

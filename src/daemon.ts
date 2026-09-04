@@ -12,11 +12,31 @@
  * reports liveness and reaps a stale pidfile. Process control is injectable
  * so the lifecycle is unit-testable without real children.
  */
-import { spawn, spawnSync } from 'node:child_process';
+import { spawn } from 'node:child_process';
 import { mkdirSync, openSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { defaultStateDir } from './state.js';
+import {
+  daemonServicePath,
+  defaultRun,
+  installDarwinService,
+  installSystemdService,
+  resolveServiceInstallPaths,
+  SYSTEMD_UNIT_NAME,
+  type ServiceInstallResult,
+  type ServiceOptions,
+} from './daemon-service.js';
+
+export {
+  DAEMON_SERVICE_LABEL,
+  daemonServicePath,
+  renderLaunchdPlist,
+  renderSystemdUnit,
+  type RunFn,
+  type ServiceInstallResult,
+  type ServiceOptions,
+} from './daemon-service.js';
 
 /** The pidfile state persisted while the daemon runs. */
 export interface DaemonState {
@@ -165,131 +185,56 @@ export interface StopDaemonOptions {
  * SIGTERM the daemon and remove the pidfile. Idempotent: no pidfile (or a
  * stale one) is a clean "not running", not an error.
  */
+/**
+ * Resolve the daemon state for stopping: null when not running or stale.
+ * Module-private; reduces complexity in stopDaemon.
+ */
+function resolveStopState(
+  dir: string,
+  alive: (pid: number) => boolean,
+): DaemonState | 'not running' | 'cleaned stale' {
+  const state = readDaemonState(dir);
+  if (state === null) return 'not running';
+  if (!alive(state.pid)) {
+    removeDaemonState(dir);
+    return 'cleaned stale';
+  }
+  return state;
+}
+
+/** SIGTERM a pid; suppress already-exiting noise. Module-private. */
+function sigtermPid(pid: number, kill: KillFn): void {
+  try {
+    kill(pid, 'SIGTERM');
+  } catch {
+    /* already exiting */
+  }
+}
+
+const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
+
+async function waitForExit(
+  deadline: number,
+  pid: number,
+  alive: (pid: number) => boolean,
+): Promise<void> {
+  if (Date.now() >= deadline || !alive(pid)) return;
+  await sleep(50);
+  return waitForExit(deadline, pid, alive);
+}
+
 export async function stopDaemon(opts: StopDaemonOptions = {}): Promise<StopDaemonResult> {
   const dir = opts.dir ?? defaultStateDir();
   const kill: KillFn = opts.kill ?? process.kill;
   const alive = opts.alive ?? ((pid: number) => isPidAlive(pid, kill));
-  const state = readDaemonState(dir);
-  if (state === null) return { stopped: false, reason: 'not running' };
-  if (!alive(state.pid)) {
-    removeDaemonState(dir);
-    return { stopped: false, reason: 'not running (cleaned stale pidfile)' };
-  }
-  try {
-    kill(state.pid, 'SIGTERM');
-  } catch {
-    /* already exiting */
-  }
-  const deadline = Date.now() + (opts.waitMs ?? 2_000);
-  while (Date.now() < deadline && alive(state.pid)) {
-    await new Promise((r) => setTimeout(r, 50));
-  }
+  const resolved = resolveStopState(dir, alive);
+  if (resolved === 'not running') return { stopped: false, reason: 'not running' };
+  if (resolved === 'cleaned stale') return { stopped: false, reason: 'not running (cleaned stale pidfile)' };
+  const state = resolved;
+  sigtermPid(state.pid, kill);
+  await waitForExit(Date.now() + (opts.waitMs ?? 2_000), state.pid, alive);
   removeDaemonState(dir);
   return { stopped: true, pid: state.pid };
-}
-
-/* -------------------------------------------------------------------------- */
-/* Login-service install (launchd on macOS, systemd --user on Linux)          */
-/* -------------------------------------------------------------------------- */
-
-/** launchd label / systemd unit name for the login service. */
-export const DAEMON_SERVICE_LABEL = 'ai.vibedating.daemon';
-const SYSTEMD_UNIT_NAME = 'vibedating.service';
-
-/**
- * Where the login-service definition lives for this platform, or `null` when
- * the platform has no supported user-service mechanism.
- */
-export function daemonServicePath(
-  platform: NodeJS.Platform = process.platform,
-  homeDir: string = os.homedir(),
-): string | null {
-  if (platform === 'darwin') {
-    return path.join(homeDir, 'Library', 'LaunchAgents', `${DAEMON_SERVICE_LABEL}.plist`);
-  }
-  if (platform === 'linux') {
-    return path.join(homeDir, '.config', 'systemd', 'user', SYSTEMD_UNIT_NAME);
-  }
-  return null;
-}
-
-/** The argv the service runs: `node <cli> daemon run [--any]`. */
-function serviceArgv(execPath: string, scriptPath: string, any: boolean): readonly string[] {
-  return [execPath, scriptPath, 'daemon', 'run', ...(any ? ['--any'] : [])];
-}
-
-/** Render the launchd plist (RunAtLoad on login; output → the daemon log). Pure. */
-export function renderLaunchdPlist(opts: {
-  execPath: string;
-  scriptPath: string;
-  any: boolean;
-  logPath: string;
-}): string {
-  const args = serviceArgv(opts.execPath, opts.scriptPath, opts.any)
-    .map((a) => `    <string>${a}</string>`)
-    .join('\n');
-  return `<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-  <key>Label</key>
-  <string>${DAEMON_SERVICE_LABEL}</string>
-  <key>ProgramArguments</key>
-  <array>
-${args}
-  </array>
-  <key>RunAtLoad</key>
-  <true/>
-  <key>KeepAlive</key>
-  <false/>
-  <key>StandardOutPath</key>
-  <string>${opts.logPath}</string>
-  <key>StandardErrorPath</key>
-  <string>${opts.logPath}</string>
-</dict>
-</plist>
-`;
-}
-
-/** Render the systemd --user unit (WantedBy=default.target → starts on login). Pure. */
-export function renderSystemdUnit(opts: {
-  execPath: string;
-  scriptPath: string;
-  any: boolean;
-}): string {
-  const execStart = serviceArgv(opts.execPath, opts.scriptPath, opts.any).join(' ');
-  return `[Unit]
-Description=vibedating notify-only daemon (alerts on new matches; never opens chat/video)
-
-[Service]
-ExecStart=${execStart}
-Restart=on-failure
-RestartSec=10
-
-[Install]
-WantedBy=default.target
-`;
-}
-
-/** Shell-out runner for launchctl/systemctl (injectable for tests). Returns success. */
-export type RunFn = (cmd: string, args: readonly string[]) => boolean;
-
-const defaultRun: RunFn = (cmd, args) => spawnSync(cmd, args, { stdio: 'inherit' }).status === 0;
-
-export interface ServiceInstallResult {
-  readonly installed: boolean;
-  readonly servicePath: string | null;
-  readonly detail: string;
-}
-
-export interface ServiceOptions {
-  readonly any: boolean;
-  readonly dir?: string;
-  readonly platform?: NodeJS.Platform;
-  readonly homeDir?: string;
-  readonly execPath?: string;
-  readonly scriptPath?: string;
-  readonly run?: RunFn;
 }
 
 /**
@@ -298,38 +243,23 @@ export interface ServiceOptions {
  */
 export function installDaemonService(opts: ServiceOptions): ServiceInstallResult {
   const platform = opts.platform ?? process.platform;
-  const homeDir = opts.homeDir ?? os.homedir();
   const run = opts.run ?? defaultRun;
-  const servicePath = daemonServicePath(platform, homeDir);
-  if (servicePath === null) {
-    return {
-      installed: false,
-      servicePath: null,
-      detail: `unsupported platform (${platform}) — run \`vibedate daemon start\` manually instead`,
-    };
-  }
-  const execPath = opts.execPath ?? process.execPath;
-  const scriptPath = opts.scriptPath ?? process.argv[1];
-  if (scriptPath === undefined) {
-    return { installed: false, servicePath, detail: 'cannot locate the CLI entry point' };
-  }
+  const paths = resolveServiceInstallPaths(opts);
+  if ('error' in paths) return paths.error;
+  const { servicePath, execPath, scriptPath } = paths;
   mkdirSync(path.dirname(servicePath), { recursive: true });
   if (platform === 'darwin') {
     const logPath = daemonLogPath(opts.dir ?? defaultStateDir());
-    writeFileSync(servicePath, renderLaunchdPlist({ execPath, scriptPath, any: opts.any, logPath }), 'utf8');
-    const uid = process.getuid?.() ?? 501;
-    run('launchctl', ['bootout', `gui/${uid}`, servicePath]); // best-effort (may not exist)
-    if (!run('launchctl', ['bootstrap', `gui/${uid}`, servicePath])) {
-      return { installed: false, servicePath, detail: 'launchctl bootstrap failed — service written but not loaded' };
-    }
-    return { installed: true, servicePath, detail: 'launchd agent installed — the daemon starts on login' };
+    return installDarwinService({
+      execPath,
+      scriptPath,
+      any: opts.any,
+      servicePath,
+      logPath,
+      run,
+    });
   }
-  writeFileSync(servicePath, renderSystemdUnit({ execPath, scriptPath, any: opts.any }), 'utf8');
-  run('systemctl', ['--user', 'daemon-reload']); // best-effort
-  if (!run('systemctl', ['--user', 'enable', '--now', SYSTEMD_UNIT_NAME])) {
-    return { installed: false, servicePath, detail: 'systemctl enable failed — unit written but not started' };
-  }
-  return { installed: true, servicePath, detail: 'systemd --user service installed — the daemon starts on login' };
+  return installSystemdService({ servicePath, execPath, scriptPath, any: opts.any, run });
 }
 
 /** Remove the login service installed by {@link installDaemonService}. Idempotent. */
