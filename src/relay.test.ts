@@ -214,9 +214,27 @@ describe('NostrRelayLink — e2e exchange over the mock relay', () => {
     for (const m of ['send', 'sendMedia', 'sendSignal', 'onMessage', 'onMedia', 'onSignal', 'onClose', 'close'] as const) {
       expect(typeof link[m]).toBe('function');
     }
-    // v0 media/signal are no-ops but must not throw.
+    // v0 media are no-ops but must not throw.
     expect(await link.sendMedia('/no/such/file')).toEqual({ id: '', size: 0 });
     expect(() => link.sendSignal({ t: 'rtc-offer', sdp: 'x' })).not.toThrow();
+  });
+
+  it('relays WebRTC signaling separately from text messages', async () => {
+    const { linkA, linkB } = await makePair();
+    const gotBMsgs = jestLikeCollector();
+    const gotBSignals: import('./frame.js').RtcFrame[] = [];
+    linkB.onMessage(gotBMsgs.push);
+    linkB.onSignal((f) => gotBSignals.push(f));
+
+    const offer: import('./frame.js').RtcFrame = { t: 'rtc-offer', sdp: 'fake-sdp' };
+    linkA.sendSignal(offer);
+    linkA.send('plain text');
+    await tick();
+
+    expect(gotBSignals.length).toBe(1);
+    expect(gotBSignals[0]).toEqual(offer);
+    expect(gotBMsgs.msgs.length).toBe(1);
+    expect(gotBMsgs.msgs[0]!.text).toBe('plain text');
   });
 
   it('never sends plaintext on the wire — relay events carry ciphertext only', async () => {

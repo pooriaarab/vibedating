@@ -20,7 +20,7 @@ import {
   type PeerHello,
 } from './p2p.js';
 import type { PeerLink } from './link.js';
-import { DEFAULT_CHUNK_BYTES, type ReceivedMedia } from './media.js';
+import { DEFAULT_CHUNK_BYTES, type ReceivedMedia } from '@pooriaarab/vibe-core/media';
 
 const ALICE: PeerHello = { handle: '@alice_10M', league: '10M', harness: 'claude-code' };
 const BOB: PeerHello = { handle: '@bob_10M', league: '10M', harness: 'codex' };
@@ -223,10 +223,10 @@ describe('media transfer (in-process DHT, no public network)', () => {
   it('node A sends a small VIDEO file (multi-chunk), node B reassembles identical bytes', async () => {
     const topic = randomTopic();
 
-    // Build a ~30 KiB structurally-valid MP4. Sized ABOVE DEFAULT_CHUNK_BYTES so
-    // the transfer is genuinely multi-chunk (>= 3 chunks) — exercising seq
-    // ordering + reassembly, not a one-chunk send.
-    const mp4 = buildMp4(30 * 1024);
+    // Build a structurally-valid MP4 sized ABOVE 2 * DEFAULT_CHUNK_BYTES so the
+    // transfer is genuinely multi-chunk (>= 3 chunks) under the binary wire's
+    // 64 KiB default — exercising seq ordering + reassembly, not a one-chunk send.
+    const mp4 = buildMp4(DEFAULT_CHUNK_BYTES * 2 + 8 * 1024);
     expect(mp4.subarray(4, 8).toString('ascii')).toBe('ftyp'); // valid MP4 box header
     expect(mp4.subarray(8, 12).toString('ascii')).toBe('isom'); // major brand
     const expectedChunks = Math.ceil(mp4.length / DEFAULT_CHUNK_BYTES);

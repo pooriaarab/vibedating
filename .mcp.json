@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "vibedate": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "vibedate",
+        "mcp"
+      ]
+    }
+  }
+}

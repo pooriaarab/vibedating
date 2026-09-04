@@ -43,8 +43,10 @@ interface FakeLink extends PeerLink {
 function fakeLink(handle: string, league = '10M'): FakeLink {
   let closeCb: (() => void) | undefined;
   const messageCbs = new Set<(m: { id: string; text: string; at: number }) => void>();
+  let isClosed = false;
   return {
     hello: { handle, league, harness: 'fake', verified: true, identityVerified: true },
+    get closed() { return isClosed; },
     send: vi.fn(),
     sendMedia: vi.fn().mockResolvedValue({ id: 'media-1', size: 12 }),
     sendSignal: vi.fn(),
@@ -56,8 +58,8 @@ function fakeLink(handle: string, league = '10M'): FakeLink {
     onClose: (cb) => {
       closeCb = cb;
     },
-    close: vi.fn(),
-    fireRemoteClose: () => closeCb?.(),
+    close: vi.fn(() => { isClosed = true; }),
+    fireRemoteClose: () => { isClosed = true; closeCb?.(); },
     fireMessage: (text: string, id = `m-${Math.random().toString(36).slice(2, 8)}`) => {
       const m = { id, text, at: Date.now() };
       for (const cb of messageCbs) cb(m);

@@ -548,15 +548,23 @@ export const webAppHtml = `<!DOCTYPE html>
     max-width: 85%; padding: 7px 11px; border-radius: 13px;
     font-size: .82rem; line-height: 1.4; word-break: break-word; white-space: pre-wrap;
   }
+  .cp-msg img, .cp-msg video { max-width: 100%; border-radius: 8px; margin-top: 4px; display: block; }
+  .cp-msg a.media-link { color: var(--coral); text-decoration: underline; word-break: break-all; }
   .cp-msg.them{ align-self: flex-start; background: rgba(248,239,232,.07); border: 1px solid var(--border); }
   .cp-msg.you{ align-self: flex-end; background: rgba(255,122,104,.16); border: 1px solid rgba(255,122,104,.32); }
   .cp-msg.sys{ align-self: center; background: transparent; border: 0; color: var(--muted-2); font-size: .72rem; padding: 2px 6px; }
   .chat-panel .cp-inputrow{ display: flex; gap: 8px; padding: 10px; border-top: 1px solid var(--border); }
-  .chat-panel .cp-inputrow input{
+  .chat-panel .cp-inputrow input[type="text"]{
     flex: 1; border: 1px solid var(--border-2); border-radius: 10px; background: rgba(0,0,0,.22);
     color: var(--fg); padding: 9px 11px; font: inherit; font-size: .82rem; outline: none; min-width: 0;
   }
-  .chat-panel .cp-inputrow input:focus{ border-color: var(--coral); }
+  .chat-panel .cp-inputrow input[type="text"]:focus{ border-color: var(--coral); }
+  .chat-panel .cp-attach{
+    border: 1px solid var(--border-2); border-radius: 10px; background: rgba(0,0,0,.22);
+    color: var(--muted); padding: 9px 12px; font-size: 1rem; flex-shrink: 0;
+    transition: color var(--dur-fast) ease, border-color var(--dur-fast) ease;
+  }
+  .chat-panel .cp-attach:hover{ color: var(--fg); border-color: var(--muted-2); }
   .chat-panel .cp-send{
     border: 0; border-radius: 10px; padding: 9px 14px; font-weight: 700; font-size: .8rem;
     background: linear-gradient(180deg, var(--coral), var(--coral-dim)); color: #2a1109;
@@ -564,6 +572,187 @@ export const webAppHtml = `<!DOCTYPE html>
   }
   .chat-panel .cp-send:hover{ filter: brightness(1.06); }
   .chat-panel .cp-send:active{ transform: scale(.95); }
+
+  /* ---- you identity chip (header) ---- */
+  .you-chip{
+    display:none; align-items:center; gap:10px;
+    padding: 6px 12px 6px 7px; border-radius: 999px;
+    background: rgba(0,0,0,.28); border: 1px solid var(--border-2);
+    max-width: min(420px, 52vw); min-width: 0;
+  }
+  .you-chip.is-on{ display:inline-flex; }
+  .you-chip .yc-avatar{
+    width:30px; height:30px; border-radius:50%; overflow:hidden; flex-shrink:0;
+    border: 1px solid var(--border-2); background: var(--bg-1);
+  }
+  .you-chip .yc-avatar svg{ width:100%; height:100%; display:block; }
+  .you-chip .yc-meta{ min-width:0; display:flex; flex-direction:column; gap:1px; }
+  .you-chip .yc-handle{
+    font-size:.78rem; font-weight:700; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;
+  }
+  .you-chip .yc-sub{
+    font-size:.68rem; color: var(--muted-2); display:flex; align-items:center; gap:6px; flex-wrap:wrap;
+  }
+  .topbar-right{ display:flex; align-items:center; gap:10px; flex-wrap:wrap; justify-content:flex-end; }
+
+  /* ---- identity / status marks ---- */
+  .mark{
+    display:inline-flex; align-items:center; gap:3px;
+    font-size:.66rem; font-weight:700; letter-spacing:.01em;
+    padding: 2px 7px; border-radius:999px; line-height:1.3; white-space:nowrap;
+  }
+  .mark-verified{
+    color: #bff2df; background: rgba(127,227,192,.12); border: 1px solid rgba(127,227,192,.32);
+  }
+  .mark-identity{
+    color: #e8d9ff; background: rgba(203,168,255,.12); border: 1px solid rgba(203,168,255,.32);
+  }
+  .mark-demo{
+    color: var(--muted-2); background: rgba(248,239,232,.05); border: 1px solid var(--border);
+    text-transform: uppercase; letter-spacing: .06em;
+  }
+  .mark-live{
+    color: #ffd0c8; background: rgba(255,122,104,.12); border: 1px solid rgba(255,122,104,.35);
+  }
+  .lg-pill{
+    display:inline-flex; align-items:center; gap:5px;
+    font-size:.7rem; font-weight:700; padding: 3px 9px; border-radius:999px;
+  }
+
+  /* ---- people column (live + demo) ---- */
+  .people-col{ display:flex; flex-direction:column; gap: 22px; min-width: 0; }
+  .section-head{
+    display:flex; align-items:baseline; justify-content:space-between; gap:10px;
+    margin: 0 0 12px;
+  }
+  .section-head h2{
+    font-size: 1.02rem; font-weight: 700; margin:0;
+    display:flex; align-items:center; gap:8px;
+  }
+  .section-head .count{
+    font-size:.72rem; font-weight:700; color: var(--muted-2);
+    background: rgba(0,0,0,.22); border: 1px solid var(--border);
+    padding: 3px 8px; border-radius:999px;
+  }
+  .section-sub{
+    font-size:.78rem; color: var(--muted-2); margin: -6px 0 12px; line-height:1.45;
+  }
+
+  /* Live now roster cards */
+  .live-roster{ display:flex; flex-direction:column; gap:10px; }
+  .live-card{
+    display:flex; align-items:center; gap:12px;
+    background: linear-gradient(165deg, rgba(255,122,104,.08), transparent 55%),
+                linear-gradient(180deg, var(--bg-card), var(--bg-card-2));
+    border: 1px solid rgba(255,122,104,.22);
+    border-radius: 16px; padding: 14px 14px;
+    box-shadow: var(--shadow-1);
+    transition: border-color var(--dur-fast) ease, transform var(--dur-fast) var(--ease-out);
+  }
+  .live-card:hover{ border-color: rgba(255,122,104,.4); transform: translateY(-1px); }
+  .live-card .lc-avatar{
+    width:48px; height:48px; border-radius:50%; overflow:hidden; flex-shrink:0;
+    border:1px solid var(--border-2); background:var(--bg-1);
+  }
+  .live-card .lc-avatar svg{ width:100%; height:100%; display:block; }
+  .live-card .lc-body{ flex:1; min-width:0; }
+  .live-card .lc-handle-row{
+    display:flex; align-items:center; gap:6px; flex-wrap:wrap; margin-bottom:4px;
+  }
+  .live-card .lc-handle{ font-weight:700; font-size:.92rem; word-break:break-all; }
+  .live-card .lc-meta{
+    display:flex; align-items:center; gap:6px; flex-wrap:wrap;
+    font-size:.72rem; color: var(--muted-2);
+  }
+  .live-card .lc-actions{ display:flex; flex-direction:column; gap:6px; flex-shrink:0; }
+  .live-card .lc-actions button{
+    border:0; border-radius:10px; padding:8px 14px; font-weight:700; font-size:.76rem;
+    min-width: 72px;
+    transition: transform var(--dur-fast) var(--ease-out), filter var(--dur-fast) ease, border-color var(--dur-fast) ease, color var(--dur-fast) ease;
+  }
+  .live-card .lc-actions button:active{ transform: scale(.96); }
+  .live-card .btn-call{
+    background: linear-gradient(180deg, var(--coral), var(--coral-dim)); color: #2a1109;
+    box-shadow: 0 8px 18px -10px rgba(255,122,104,.55);
+  }
+  .live-card .btn-call:hover{ filter: brightness(1.06); }
+  .live-card .btn-call:disabled{ opacity:.4; cursor:not-allowed; filter:none; box-shadow:none; }
+  .live-card .btn-chat{
+    background: transparent; color: var(--muted); border: 1px solid var(--border-2);
+  }
+  .live-card .btn-chat:hover{ color: var(--fg); border-color: var(--muted-2); }
+  .live-card .btn-chat.has-unread{
+    color: var(--coral); border-color: rgba(255,122,104,.45);
+    background: rgba(255,122,104,.08);
+  }
+
+  .live-empty{
+    border: 1px dashed var(--border-2); border-radius: 16px;
+    padding: 18px 16px; text-align:center;
+    background: rgba(0,0,0,.14);
+  }
+  .live-empty strong{ display:block; font-size:.9rem; margin-bottom:4px; }
+  .live-empty p{ margin:0; font-size:.8rem; color: var(--muted-2); line-height:1.45; }
+
+  .live-now-wrap.has-live .section-head h2 .pulse-live{
+    width:8px; height:8px; border-radius:50%; background: var(--coral);
+    box-shadow: 0 0 0 3px rgba(255,122,104,.2);
+    animation: pulse-dot 2s ease-in-out infinite; display:inline-block;
+  }
+
+  /* Demo badge on match cards */
+  .mc-demo-badge{
+    position:absolute; top:14px; right:14px; z-index:2;
+  }
+  .match-card{ position:absolute; /* ensure badge anchors */ }
+  .mc-handle-row{ display:flex; align-items:center; gap:7px; flex-wrap:wrap; }
+  .demo-note{
+    font-size:.74rem; color: var(--muted-2); margin: 0 0 10px; line-height:1.4;
+  }
+  .demo-note b{ color: var(--muted); font-weight:600; }
+
+  /* Stack polish when demo secondary */
+  .stack-wrap.is-secondary{ opacity: .92; }
+  .people-col .stack-wrap{ height: 430px; }
+
+  /* Video / room / chat polish */
+  .video-modal .vtile video{
+    box-shadow: 0 24px 60px -28px rgba(0,0,0,.8), 0 0 0 1px rgba(255,122,104,.12);
+  }
+  .video-modal .vlabel{
+    background: rgba(0,0,0,.35); padding: 4px 10px; border-radius:999px;
+    border: 1px solid var(--border);
+  }
+  .room-video .rv-tile video{
+    box-shadow: 0 14px 36px -20px rgba(0,0,0,.7);
+  }
+  .room-video .rv-head{
+    background: rgba(0,0,0,.28); border: 1px solid var(--border);
+    border-radius: 12px; padding: 10px 14px;
+  }
+  .chat-panel{
+    border-color: rgba(255,122,104,.18);
+  }
+  .chat-panel .cp-head{
+    background: rgba(0,0,0,.18);
+  }
+  .live-panel, .room-panel{
+    border-color: rgba(255,122,104,.18);
+  }
+  .live-panel .lp-title .lp-live-count,
+  .room-panel .rp-title .rp-count{
+    margin-left:auto; font-size:.68rem; font-weight:700; color: var(--muted-2);
+  }
+
+  @media (max-width: 1020px){
+    .you-chip{ max-width: 100%; }
+  }
+  @media (max-width: 480px){
+    .live-card{ flex-wrap: wrap; }
+    .live-card .lc-actions{ flex-direction: row; width: 100%; }
+    .live-card .lc-actions button{ flex:1; }
+  }
+
 </style>
 </head>
 <body>
@@ -573,7 +762,16 @@ export const webAppHtml = `<!DOCTYPE html>
     <span class="name">vibe<span>dating</span></span>
     <span class="tag">matched by how hard you push the model</span>
   </div>
-  <div class="local-badge"><span class="dot" aria-hidden="true"></span> raw usage stays local &middot; only league shared</div>
+  <div class="topbar-right">
+    <div class="you-chip" id="youChip" aria-live="polite">
+      <div class="yc-avatar" id="youChipAvatar"></div>
+      <div class="yc-meta">
+        <div class="yc-handle" id="youChipHandle">@you</div>
+        <div class="yc-sub" id="youChipSub"></div>
+      </div>
+    </div>
+    <div class="local-badge"><span class="dot" aria-hidden="true"></span> raw usage stays local &middot; only league shared</div>
+  </div>
 </header>
 
 <div class="hero">
@@ -667,12 +865,27 @@ export const webAppHtml = `<!DOCTYPE html>
     </div>
   </section>
 
-  <section class="panel" aria-label="Match stack">
-    <h2 class="panel-title">Match stack</h2>
-    <div class="stack-wrap">
-      <div class="card-stack" id="cardStack"></div>
-    </div>
-  </section>
+  <div class="people-col panel" aria-label="People">
+    <section class="live-now-wrap" id="liveNowWrap" aria-label="Live now">
+      <div class="section-head">
+        <h2><span class="pulse-live" aria-hidden="true"></span> Live now</h2>
+        <span class="count" id="liveNowCount">0</span>
+      </div>
+      <p class="section-sub">Real discovered peers on the wire &mdash; usage-verified and identity marks from their hello.</p>
+      <div class="live-roster" id="liveRoster"></div>
+    </section>
+
+    <section aria-label="Demo profiles">
+      <div class="section-head">
+        <h2>Demo profiles</h2>
+        <span class="mark mark-demo" title="Seeded local pool — not real people">demo</span>
+      </div>
+      <p class="demo-note">Seeded local filler from <b>CANDIDATES</b> &mdash; not live peers. Swipe to practice matching by league.</p>
+      <div class="stack-wrap" id="demoStackWrap">
+        <div class="card-stack" id="cardStack"></div>
+      </div>
+    </section>
+  </div>
 
   <section class="panel" aria-label="League ladder">
     <h2 class="panel-title">League ladder</h2>
@@ -708,10 +921,10 @@ export const webAppHtml = `<!DOCTYPE html>
   </div>
 </div>
 
-<aside class="live-panel" id="livePanel" aria-label="Live peers">
-  <div class="lp-title"><span class="lp-dot" aria-hidden="true"></span> Live peers</div>
+<aside class="live-panel" id="livePanel" aria-label="Live peers compact">
+  <div class="lp-title"><span class="lp-dot" aria-hidden="true"></span> Live now <span class="lp-live-count" id="lpLiveCount"></span></div>
   <div id="liveRows"></div>
-  <div class="lp-legend">&#10003; usage verified &middot; &#128273; identity verified &mdash; call someone, or wait for a call</div>
+  <div class="lp-legend">&#10003; usage verified &middot; &#128273; identity verified &mdash; real peers only (not demo)</div>
 </aside>
 
 <div class="incoming-call" id="incomingCall" role="dialog" aria-modal="true" aria-label="Incoming call">
@@ -729,12 +942,14 @@ export const webAppHtml = `<!DOCTYPE html>
   <div class="cp-head">
     <div>
       <div class="cp-title" id="chatTitle">@peer</div>
-      <div class="cp-sub" id="chatSub">live over the P2P link &middot; text only</div>
+      <div class="cp-sub" id="chatSub">live peer &middot; P2P text</div>
     </div>
     <button class="cp-close" id="chatClose" type="button" aria-label="Close chat">&times;</button>
   </div>
   <div class="cp-msgs" id="chatMsgs"></div>
   <div class="cp-inputrow">
+    <button class="cp-attach" id="chatAttachBtn" type="button" aria-label="Attach file" title="Attach file">📎</button>
+    <input type="file" id="chatFileInput" style="display:none;">
     <input id="chatInput" type="text" maxlength="4000" placeholder="message&hellip;" autocomplete="off">
     <button class="cp-send" id="chatSend" type="button">Send</button>
   </div>
@@ -747,7 +962,7 @@ export const webAppHtml = `<!DOCTYPE html>
 </div>
 
 <aside class="room-panel" id="roomPanel" aria-label="Room">
-  <div class="rp-title"><span class="lp-dot" aria-hidden="true"></span> Room</div>
+  <div class="rp-title"><span class="lp-dot" aria-hidden="true"></span> Room <span class="rp-count" id="rpCount"></span></div>
   <div class="rp-meta" id="roomMeta">not in a room</div>
   <div class="rp-actions">
     <button class="rp-btn" id="roomJoinBtn" type="button">Join video</button>
@@ -803,6 +1018,12 @@ export const webAppHtml = `<!DOCTYPE html>
   function leagueColorHex(id){ var l = leagueById(id); return l ? l.hex : "#ffcf6b"; }
   function fmt(n){ return Math.round(n).toLocaleString("en-US"); }
   function variantFor(handle){ var h=0; for (var i=0;i<handle.length;i++){ h=(h*31+handle.charCodeAt(i))>>>0; } return h % BLOB_PATHS.length; }
+
+  // Shared with the live A/V script (separate IIFE) — roster cards need avatars + league colors.
+  window.__vdAvatarSVG = avatarSVG;
+  window.__vdVariantFor = variantFor;
+  window.__vdLeagueById = leagueById;
+  window.__vdLeagueColorHex = leagueColorHex;
 
   var state = { connected:false };
   var stackIndex = 0;
@@ -868,15 +1089,52 @@ export const webAppHtml = `<!DOCTYPE html>
     state = s || { connected:false };
     if (state.connected){
       renderReveal(state);
+      renderYouChip(state);
       renderYouMarker(state.league);
       stackIndex = 0;
       renderStack();
       showStep("reveal");
     } else {
+      renderYouChip(null);
       stackIndex = 0;
       renderStack();
       showStep("idle");
     }
+  }
+
+  function renderYouChip(s){
+    var chip = document.getElementById("youChip");
+    if (!chip) return;
+    if (!s || !s.connected){
+      chip.classList.remove("is-on");
+      return;
+    }
+    var lg = leagueById(s.league);
+    var hex = lg ? lg.hex : "#ffcf6b";
+    document.getElementById("youChipAvatar").innerHTML = avatarSVG(3, hex);
+    document.getElementById("youChipHandle").textContent = s.handle || "@you";
+    var sub = document.getElementById("youChipSub");
+    sub.innerHTML = "";
+    var pill = document.createElement("span");
+    pill.className = "lg-pill";
+    pill.style.background = "color-mix(in srgb, " + hex + " 16%, transparent)";
+    pill.style.border = "1px solid color-mix(in srgb, " + hex + " 40%, transparent)";
+    pill.style.color = hex;
+    pill.textContent = lg ? lg.label : ((s.league || "?") + " League");
+    sub.appendChild(pill);
+    if (s.verified){
+      var vm = document.createElement("span");
+      vm.className = "mark mark-verified";
+      vm.textContent = "✓ verified";
+      sub.appendChild(vm);
+    } else {
+      var lm = document.createElement("span");
+      lm.className = "mark mark-demo";
+      lm.textContent = "local";
+      lm.title = "Usage read locally / self-reported";
+      sub.appendChild(lm);
+    }
+    chip.classList.add("is-on");
   }
 
   function renderReveal(s){
@@ -928,6 +1186,7 @@ export const webAppHtml = `<!DOCTYPE html>
     rawToggle.setAttribute("aria-expanded","false");
     rawToggle.textContent = "show raw usage (visible only to you)";
     document.querySelectorAll(".you-marker").forEach(function(m){ m.remove(); });
+    renderYouChip(null);
     stackIndex = 0;
     renderStack();
     showStep("idle");
@@ -975,8 +1234,8 @@ export const webAppHtml = `<!DOCTYPE html>
       if (!state.connected){
         empty.innerHTML = "<strong>Connect to see matches.</strong><p>Read your usage to get sorted into a league and start matching.</p>";
       } else {
-        empty.innerHTML = "<strong>That's everyone in range.</strong><p>You've matched through today's pool. It refreshes with the next billing cycle.</p>" +
-          '<button class="btn btn-primary" id="btnRestart" type="button" style="width:auto;padding:11px 20px;">Start over</button>';
+        empty.innerHTML = "<strong>End of demo pool.</strong><p>These were seeded demo profiles — not live peers. Real people show up under Live now.</p>" +
+          '<button class="btn btn-primary" id="btnRestart" type="button" style="width:auto;padding:11px 20px;">Restart demo</button>';
       }
       cardStackEl.appendChild(empty);
       var restart = empty.querySelector("#btnRestart");
@@ -992,12 +1251,13 @@ export const webAppHtml = `<!DOCTYPE html>
       var label = lg ? lg.label : (cand.league + " League");
       var bio = cand.bio || [];
       el.innerHTML =
+        '<span class="mc-demo-badge mark mark-demo" title="Seeded demo profile — not a live peer">demo</span>' +
         '<div class="mc-top">' +
           '<div class="mc-avatar">' + avatarSVG(variantFor(cand.handle), hex) + '</div>' +
           '<div>' +
-            '<div class="mc-handle">' + cand.handle + '</div>' +
+            '<div class="mc-handle-row"><div class="mc-handle">' + cand.handle + '</div></div>' +
             '<span class="mc-league" style="background:color-mix(in srgb,' + hex + ' 16%, transparent);border:1px solid color-mix(in srgb,' + hex + ' 40%, transparent);color:' + hex + '">' + label + '</span>' +
-            '<div class="mc-verified">&#10003; usage verified</div>' +
+            '<div class="mc-verified" style="color:var(--muted-2)">seeded local profile</div>' +
           '</div>' +
         '</div>' +
         '<div class="mc-bio"><p>' + (bio[0] || "") + '</p><p>' + (bio[1] || "") + '</p></div>' +
@@ -1005,7 +1265,7 @@ export const webAppHtml = `<!DOCTYPE html>
           '<div class="mc-actions">' +
             '<button class="round-btn pass" type="button" title="Pass">&#10005;</button>' +
             '<button class="round-btn like" type="button" title="Like">&#9829;</button>' +
-            '<span class="hint"></span>' +
+            '<span class="hint">demo</span>' +
           '</div>' : '');
       cardStackEl.appendChild(el);
       if (depth === 0){
@@ -1075,9 +1335,8 @@ export const webAppHtml = `<!DOCTYPE html>
   var idleIdx = 0;
 
   function rtcConfig(){
-    // A public STUN server crosses most NATs. No TURN in v0 — symmetric NATs
-    // won't connect, but signaling still completes and the call fails open.
-    return { iceServers: [{ urls: "stun:stun.l.google.com:19302" }] };
+    var extra = (window.__VIBE_ICE__ && window.__VIBE_ICE__.iceServers) || [];
+    return { iceServers: [{ urls: "stun:stun.l.google.com:19302" }].concat(extra) };
   }
   function sleep(ms){ return new Promise(function(r){ setTimeout(r, ms); }); }
 
@@ -1253,6 +1512,8 @@ export const webAppHtml = `<!DOCTYPE html>
   var chatSub = document.getElementById("chatSub");
   var chatMsgs = document.getElementById("chatMsgs");
   var chatInput = document.getElementById("chatInput");
+  var chatAttachBtn = document.getElementById("chatAttachBtn");
+  var chatFileInput = document.getElementById("chatFileInput");
   var chatSend = document.getElementById("chatSend");
   var chatClose = document.getElementById("chatClose");
 
@@ -1260,6 +1521,7 @@ export const webAppHtml = `<!DOCTYPE html>
   var conversations = {};   // handle -> [{from:"you"|"them"|"sys", text}]
   var unread = {};          // handle -> count of unseen incoming messages
   var chatLoops = {};       // handle -> true while its poll loop is running
+  var mediaLoops = {};      // handle -> true while its poll loop is running
   var MAX_CHAT_KEPT = 200;  // per-conversation local cap (mirrors the server)
 
   function fetchMessage(handle, timeoutMs){
@@ -1270,11 +1532,27 @@ export const webAppHtml = `<!DOCTYPE html>
       .catch(function(e){ clearTimeout(t); throw e; });
   }
 
+  function fetchMedia(handle, timeoutMs){
+    var ctrl = new AbortController();
+    var t = setTimeout(function(){ ctrl.abort(); }, timeoutMs);
+    return fetch("/live/media?handle=" + encodeURIComponent(handle), { signal: ctrl.signal })
+      .then(function(r){ clearTimeout(t); return r; })
+      .catch(function(e){ clearTimeout(t); throw e; });
+  }
+
   function postChat(handle, text){
     return fetch("/live/message", {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ handle: handle, text: text })
+    });
+  }
+
+  function postMedia(handle, name, mime, dataB64){
+    return fetch("/live/media", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ handle: handle, name: name, mime: mime, dataB64: dataB64 })
     });
   }
 
@@ -1292,27 +1570,51 @@ export const webAppHtml = `<!DOCTYPE html>
   // One long-poll loop per connected peer: started when the peer is first
   // seen, stopped when it vanishes (its mailbox on the server is gone).
   function ensureChatLoop(handle){
-    if (chatLoops[handle]) return;
-    chatLoops[handle] = true;
-    (async function(){
-      while (peerKnown(handle)) {
-        var res;
-        try { res = await fetchMessage(handle, 30000); }
-        catch(e){ await sleep(1000); continue; }
-        if (!res || res.status !== 200) { await sleep(1000); continue; }
-        var data = await res.json();
-        var m = data && data.message;
-        if (!m) continue; // timed out empty
-        pushChat(handle, { from: "them", text: m.text });
-        if (chatWith === handle) {
-          renderChat();
-        } else {
-          unread[handle] = (unread[handle] || 0) + 1;
-          renderLiveRows(knownPeers);
+    if (!chatLoops[handle]) {
+      chatLoops[handle] = true;
+      (async function(){
+        while (peerKnown(handle)) {
+          var res;
+          try { res = await fetchMessage(handle, 30000); }
+          catch(e){ await sleep(1000); continue; }
+          if (!res || res.status !== 200) { await sleep(1000); continue; }
+          var data = await res.json();
+          var m = data && data.message;
+          if (!m) continue; // timed out empty
+          pushChat(handle, { from: "them", text: m.text });
+          if (chatWith === handle) {
+            renderChat();
+          } else {
+            unread[handle] = (unread[handle] || 0) + 1;
+            renderLiveRows(knownPeers);
+          }
         }
-      }
-      delete chatLoops[handle];
-    })();
+        delete chatLoops[handle];
+      })();
+    }
+
+    if (!mediaLoops[handle]) {
+      mediaLoops[handle] = true;
+      (async function(){
+        while (peerKnown(handle)) {
+          var res;
+          try { res = await fetchMedia(handle, 30000); }
+          catch(e){ await sleep(1000); continue; }
+          if (!res || res.status !== 200) { await sleep(1000); continue; }
+          var data = await res.json();
+          var m = data && data.media;
+          if (!m) continue; // timed out empty
+          pushChat(handle, { from: "them", media: m });
+          if (chatWith === handle) {
+            renderChat();
+          } else {
+            unread[handle] = (unread[handle] || 0) + 1;
+            renderLiveRows(knownPeers);
+          }
+        }
+        delete mediaLoops[handle];
+      })();
+    }
   }
 
   function renderChat(){
@@ -1328,8 +1630,30 @@ export const webAppHtml = `<!DOCTYPE html>
     conv.forEach(function(m){
       var el = document.createElement("div");
       el.className = "cp-msg " + (m.from === "you" ? "you" : m.from === "sys" ? "sys" : "them");
-      // textContent only — a peer's text is never parsed as HTML.
-      el.textContent = m.text;
+      if (m.media) {
+        var isImage = m.media.mime.indexOf("image/") === 0;
+        var isVideo = m.media.mime.indexOf("video/") === 0;
+        if (isImage) {
+          var img = document.createElement("img");
+          img.src = "data:" + m.media.mime + ";base64," + m.media.dataB64;
+          el.appendChild(img);
+        } else if (isVideo) {
+          var vid = document.createElement("video");
+          vid.src = "data:" + m.media.mime + ";base64," + m.media.dataB64;
+          vid.controls = true;
+          el.appendChild(vid);
+        } else {
+          var a = document.createElement("a");
+          a.className = "media-link";
+          a.href = "data:" + (m.media.mime || "application/octet-stream") + ";base64," + m.media.dataB64;
+          a.download = m.media.name;
+          a.textContent = "📎 " + m.media.name;
+          el.appendChild(a);
+        }
+      } else {
+        // textContent only — a peer's text is never parsed as HTML.
+        el.textContent = m.text;
+      }
       chatMsgs.appendChild(el);
     });
     chatMsgs.scrollTop = chatMsgs.scrollHeight;
@@ -1340,7 +1664,7 @@ export const webAppHtml = `<!DOCTYPE html>
     delete unread[handle];
     chatTitle.textContent = handle;
     chatSub.textContent = peerKnown(handle)
-      ? "live over the P2P link · text only"
+      ? "live peer · P2P text · not a demo profile"
       : "peer offline · messages will not deliver";
     chatPanel.classList.add("is-open");
     renderChat();
@@ -1371,20 +1695,151 @@ export const webAppHtml = `<!DOCTYPE html>
   chatSend.addEventListener("click", sendChat);
   chatInput.addEventListener("keydown", function(e){ if (e.key === "Enter") sendChat(); });
 
+  chatAttachBtn.addEventListener("click", function(){
+    if (!chatWith) return;
+    chatFileInput.click();
+  });
+  chatFileInput.addEventListener("change", function(e){
+    var target = chatWith;
+    if (!target) return;
+    var file = e.target.files[0];
+    if (!file) return;
+    chatFileInput.value = ""; // clear
+    var reader = new FileReader();
+    reader.onload = function(evt) {
+      var res = evt.target.result; // data:mime;base64,.....
+      var mime = res.split(';')[0].split(':')[1] || '';
+      var b64 = res.split(',')[1];
+      postMedia(target, file.name, mime, b64).then(function(r){
+        pushChat(target, r && r.status === 200
+          ? { from: "you", media: { name: file.name, mime: mime, dataB64: b64 } }
+          : { from: "sys", text: "(file not delivered — too large or peer offline?)" });
+        if (chatWith === target) renderChat();
+      }).catch(function(){
+        pushChat(target, { from: "sys", text: "(file not delivered — server unreachable)" });
+        if (chatWith === target) renderChat();
+      });
+    };
+    reader.readAsDataURL(file);
+  });
+
   // Render the live-peers rows: one per connected peer with its verification
   // marks, a Chat button (opens the conversation), and a Call button that
   // rings THAT peer specifically.
+    // Marks from the peer's hello: ✓ usage verified (real logs), 🔑 identity (signed).
+  function peerMarksHtml(p){
+    var html = "";
+    if (p.verified === true) html += '<span class="mark mark-verified" title="Usage verified from real local logs">✓ verified</span>';
+    if (p.identityVerified === true) html += '<span class="mark mark-identity" title="Identity signature verified">🔑 identity</span>';
+    return html;
+  }
+
+  function leaguePillHtml(leagueId){
+    var FALLBACK = { "1M":"#d69a6e","5M":"#cfd8e6","10M":"#ffcf6b","100M":"#f0839c","1B+":"#cba8ff" };
+    var LABELS = { "1M":"1M League","5M":"5M League","10M":"10M League","100M":"100M League","1B+":"1B+ League" };
+    var lg = typeof window.__vdLeagueById === "function" ? window.__vdLeagueById(leagueId) : null;
+    var hex = lg ? lg.hex : (FALLBACK[leagueId] || "#ffcf6b");
+    var label = lg ? lg.label : (LABELS[leagueId] || ((leagueId || "?") + " League"));
+    return '<span class="lg-pill" style="background:color-mix(in srgb,' + hex + ' 16%, transparent);border:1px solid color-mix(in srgb,' + hex + ' 40%, transparent);color:' + hex + '">' + label + '</span>';
+  }
+
+  function avatarForPeer(handle, leagueId){
+    var FALLBACK = { "1M":"#d69a6e","5M":"#cfd8e6","10M":"#ffcf6b","100M":"#f0839c","1B+":"#cba8ff" };
+    var hex = (typeof window.__vdLeagueColorHex === "function")
+      ? window.__vdLeagueColorHex(leagueId)
+      : (FALLBACK[leagueId] || "#ffcf6b");
+    if (typeof window.__vdAvatarSVG === "function" && typeof window.__vdVariantFor === "function") {
+      return window.__vdAvatarSVG(window.__vdVariantFor(handle), hex);
+    }
+    return "";
+  }
+
+  // Compact dock rows (floating panel) + full Live now roster cards (main column).
   function renderLiveRows(peers){
     liveRows.innerHTML = "";
+    var roster = document.getElementById("liveRoster");
+    var wrap = document.getElementById("liveNowWrap");
+    var countEl = document.getElementById("liveNowCount");
+    var lpCount = document.getElementById("lpLiveCount");
+    var demoWrap = document.getElementById("demoStackWrap");
+
+    if (countEl) countEl.textContent = String(peers.length);
+    if (lpCount) lpCount.textContent = peers.length ? (peers.length + " online") : "";
+    if (wrap) wrap.classList.toggle("has-live", peers.length > 0);
+    if (demoWrap) demoWrap.classList.toggle("is-secondary", peers.length > 0);
+
+    if (roster) {
+      roster.innerHTML = "";
+      if (peers.length === 0) {
+        var empty = document.createElement("div");
+        empty.className = "live-empty";
+        empty.innerHTML = "<strong>No live peers right now</strong><p>When someone on your league topic connects, they show up here — clearly separate from the demo pool below.</p>";
+        roster.appendChild(empty);
+      } else {
+        peers.forEach(function(p){
+          var card = document.createElement("article");
+          card.className = "live-card";
+
+          var av = document.createElement("div");
+          av.className = "lc-avatar";
+          av.innerHTML = avatarForPeer(p.handle, p.league);
+
+          var body = document.createElement("div");
+          body.className = "lc-body";
+          var handleRow = document.createElement("div");
+          handleRow.className = "lc-handle-row";
+          var handleEl = document.createElement("div");
+          handleEl.className = "lc-handle";
+          handleEl.textContent = p.handle;
+          handleRow.appendChild(handleEl);
+          var liveMark = document.createElement("span");
+          liveMark.className = "mark mark-live";
+          liveMark.textContent = "live";
+          handleRow.appendChild(liveMark);
+          body.appendChild(handleRow);
+
+          var meta = document.createElement("div");
+          meta.className = "lc-meta";
+          meta.innerHTML = leaguePillHtml(p.league) + peerMarksHtml(p) +
+            '<span style="opacity:.75">' + (p.harness || "") + "</span>";
+          body.appendChild(meta);
+
+          var actions = document.createElement("div");
+          actions.className = "lc-actions";
+          var chatBtn = document.createElement("button");
+          chatBtn.className = "btn-chat" + (unread[p.handle] ? " has-unread" : "");
+          chatBtn.type = "button";
+          chatBtn.textContent = "Chat" + (unread[p.handle] ? " (" + unread[p.handle] + ")" : "");
+          chatBtn.addEventListener("click", function(){ openChat(p.handle); });
+          var callBtn = document.createElement("button");
+          callBtn.className = "btn-call";
+          callBtn.type = "button";
+          callBtn.textContent = "Call";
+          callBtn.disabled = !!(rtc.remoteHandle || pendingOffer);
+          callBtn.addEventListener("click", function(){
+            if (rtc.remoteHandle || pendingOffer) return;
+            callBtn.disabled = true;
+            startCallAsOfferer(p.handle).catch(function(){ hangup(); });
+          });
+          actions.appendChild(chatBtn);
+          actions.appendChild(callBtn);
+
+          card.appendChild(av);
+          card.appendChild(body);
+          card.appendChild(actions);
+          roster.appendChild(card);
+        });
+      }
+    }
+
+    // Compact floating dock — still handy when scrolled away from the roster.
     peers.forEach(function(p){
       var row = document.createElement("div");
       row.className = "live-row";
       var who = document.createElement("div");
-      // Marks from the peer's hello, shown only when present: ✓ usage
-      // verified (real local logs), 🔑 identity-verified (signed hello).
       var marks = (p.verified === true ? " ✓" : "") + (p.identityVerified === true ? " 🔑" : "");
       var h = document.createElement("div"); h.className = "h"; h.textContent = p.handle + marks;
-      var s = document.createElement("div"); s.className = "s"; s.textContent = p.league + " \u00b7 " + p.harness;
+      var s = document.createElement("div"); s.className = "s"; s.textContent = p.league + " · " + p.harness;
       who.appendChild(h); who.appendChild(s);
       var actions = document.createElement("div");
       actions.className = "live-actions";
@@ -1396,9 +1851,8 @@ export const webAppHtml = `<!DOCTYPE html>
       var btn = document.createElement("button");
       btn.className = "vbtn"; btn.type = "button"; btn.textContent = "Call";
       btn.addEventListener("click", function(){
-        if (rtc.remoteHandle || pendingOffer) return; // already in a call / prompt
+        if (rtc.remoteHandle || pendingOffer) return;
         btn.disabled = true;
-        // DIRECTED call: the rtc-offer is relayed only to this peer's handle.
         startCallAsOfferer(p.handle).catch(function(){ hangup(); });
       });
       actions.appendChild(chatBtn);
@@ -1419,14 +1873,16 @@ export const webAppHtml = `<!DOCTYPE html>
       peers.forEach(function(p){ ensureChatLoop(p.handle); });
       if (chatWith) {
         chatSub.textContent = peerKnown(chatWith)
-          ? "live over the P2P link · text only"
+          ? "live peer · P2P text"
           : "peer offline · messages will not deliver";
       }
-      if (peers.length === 0) { livePanel.classList.remove("is-open"); return; }
-      livePanel.classList.add("is-open");
       renderLiveRows(peers);
+      if (peers.length === 0) { livePanel.classList.remove("is-open"); }
+      else { livePanel.classList.add("is-open"); }
     } catch(e){}
   }
+  // Initial empty state for the main Live now section, then poll.
+  renderLiveRows([]);
   refreshPeers();
   setInterval(refreshPeers, 4000);
 
@@ -1667,6 +2123,8 @@ export const webAppHtml = `<!DOCTYPE html>
       roomMeta.textContent = roomName +
         (roomVid.self ? " · you " + roomVid.self : "") +
         " · " + n + " other" + (n === 1 ? "" : "s");
+      var rpCount = document.getElementById("rpCount");
+      if (rpCount) rpCount.textContent = n ? (n + " other" + (n === 1 ? "" : "s")) : "empty";
       roomPanel.classList.add("is-open");
       roomJoinBtn.disabled = roomVid.joined || !roomVid.self;
       roomLeaveBtn.disabled = !roomVid.joined;

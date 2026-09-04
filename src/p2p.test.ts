@@ -140,16 +140,59 @@ describe('recordPeer() / loadPeers()', () => {
   });
 
   it('first sighting is new; re-sighting the same handle is not', () => {
-    expect(recordPeer(alice, dir, new Date('2026-07-27T00:00:00Z')).isNew).toBe(true);
-    expect(recordPeer(alice, dir, new Date('2026-07-27T01:00:00Z')).isNew).toBe(false);
+    const lastSeenAt = new Date();
+    const firstSeenAt = new Date(lastSeenAt.getTime() - 60 * 60 * 1000);
+    expect(recordPeer(alice, dir, firstSeenAt).isNew).toBe(true);
+    expect(recordPeer(alice, dir, lastSeenAt).isNew).toBe(false);
     const peers = loadPeers(dir);
     expect(peers).toHaveLength(1);
     expect(peers[0]).toMatchObject({
       handle: '@alice',
       league: '10M',
-      firstSeenAt: '2026-07-27T00:00:00.000Z',
-      lastSeenAt: '2026-07-27T01:00:00.000Z',
+      firstSeenAt: firstSeenAt.toISOString(),
+      lastSeenAt: lastSeenAt.toISOString(),
     });
+  });
+
+  it('keys by pubkey if present; renaming handle updates the existing record', () => {
+    const p1: PeerHello = { handle: '@alice', league: '10M', harness: 'claude', pubkey: 'pub1' };
+    const p2: PeerHello = { handle: '@alice_renamed', league: '10M', harness: 'claude', pubkey: 'pub1' };
+    const lastSeenAt = new Date();
+    const firstSeenAt = new Date(lastSeenAt.getTime() - 60 * 60 * 1000);
+    
+    expect(recordPeer(p1, dir, firstSeenAt).isNew).toBe(true);
+    expect(recordPeer(p2, dir, lastSeenAt).isNew).toBe(false);
+    
+    const peers = loadPeers(dir);
+    expect(peers).toHaveLength(1);
+    expect(peers[0]).toMatchObject({
+      handle: '@alice_renamed',
+      pubkey: 'pub1',
+      lastSeenAt: lastSeenAt.toISOString()
+    });
+  });
+
+  it('legacy no-pubkey peer still keys by handle', () => {
+    const p1: PeerHello = { handle: '@bob', league: '10M', harness: 'claude' };
+    const p2: PeerHello = { handle: '@bob', league: '10M', harness: 'claude' };
+    const lastSeenAt = new Date();
+    const firstSeenAt = new Date(lastSeenAt.getTime() - 60 * 60 * 1000);
+    
+    expect(recordPeer(p1, dir, firstSeenAt).isNew).toBe(true);
+    expect(recordPeer(p2, dir, lastSeenAt).isNew).toBe(false);
+    expect(loadPeers(dir)).toHaveLength(1);
+  });
+
+  it('expiry drops old entries', () => {
+    const oldDate = new Date(Date.now() - 10 * 24 * 60 * 60 * 1000); // 10 days ago
+    recordPeer(alice, dir, oldDate);
+    const bob: PeerHello = { handle: '@bob', league: '10M', harness: 'claude' };
+    recordPeer(bob, dir, new Date());
+    
+    // loadPeers should drop alice
+    const peers = loadPeers(dir);
+    expect(peers).toHaveLength(1);
+    expect(peers[0]!.handle).toBe('@bob');
   });
 
   it('persists multiple peers across loads', () => {
@@ -230,17 +273,20 @@ describe('recordPeer() — identity + lastMessageAt persistence', () => {
   });
 
   it('recordPeerMessage stamps lastMessageAt; a later hello preserves it', () => {
-    expect(recordPeerMessage('@nobody', dir)).toBe(false); // unknown handle
-    recordPeer(alice, dir, new Date('2026-07-27T00:00:00Z'));
-    expect(recordPeerMessage('@alice', dir, new Date('2026-07-27T02:00:00Z'))).toBe(true);
-    expect(loadPeers(dir)[0]).toMatchObject({ lastMessageAt: '2026-07-27T02:00:00.000Z' });
+    const lastSeenAt = new Date();
+    const messageAt = new Date(lastSeenAt.getTime() - 60 * 60 * 1000);
+    const firstSeenAt = new Date(lastSeenAt.getTime() - 2 * 60 * 60 * 1000);
+    expect(recordPeerMessage({ handle: '@nobody', league: '10M', harness: 'claude-code' }, dir)).toBe(false); // unknown handle
+    recordPeer(alice, dir, firstSeenAt);
+    expect(recordPeerMessage(alice, dir, messageAt)).toBe(true);
+    expect(loadPeers(dir)[0]).toMatchObject({ lastMessageAt: messageAt.toISOString() });
     // A re-sighting (hello) must NOT reset local message metadata.
-    recordPeer({ ...alice, verified: true }, dir, new Date('2026-07-27T03:00:00Z'));
+    recordPeer({ ...alice, verified: true }, dir, lastSeenAt);
     const peer = loadPeers(dir)[0]!;
     expect(peer).toMatchObject({
       verified: true,
-      lastSeenAt: '2026-07-27T03:00:00.000Z',
-      lastMessageAt: '2026-07-27T02:00:00.000Z',
+      lastSeenAt: lastSeenAt.toISOString(),
+      lastMessageAt: messageAt.toISOString(),
     });
   });
 });
