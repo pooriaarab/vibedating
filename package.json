@@ -41,7 +41,7 @@
     "tsup": "^8.0.0",
     "tsx": "^4.23.1",
     "typescript": "^5.4.0",
-    "vitest": "^1.6.0",
+    "vitest": "^5.0.0",
     "werift": "^0.24.1"
   },
   "homepage": "https://github.com/pooriaarab/vibedating#readme",
