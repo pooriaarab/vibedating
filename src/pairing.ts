@@ -8,6 +8,12 @@
  *   - Dating: `open(handle)` picks the specific waiting link whose peer
  *     advertised that handle, closing any current match first.
  *
+ * Message buffering (agent-native / MCP): every link is watched for `msg`
+ * frames. Messages from the current match surface via {@link LivePairing.onMessage};
+ * messages from queued (non-current) peers surface via {@link LivePairing.onQueued}.
+ * Both also land in an internal drain buffer that {@link LivePairing.drain}
+ * returns and empties — so a coding agent can poll instead of sitting on a TTY.
+ *
  * This module knows nothing about hyperswarm, the DHT, or the wire — it only
  * shuffles {@link PeerLink}s handed to it. That keeps it trivially unit-testable
  * with fakes and keeps the policy out of the transport.
@@ -50,6 +56,8 @@ export interface LivePairing {
   readonly available: number;
   /** The currently-matched link, or `undefined` when idle. */
   current(): PeerLink | undefined;
+  /** Snapshot of queued (non-current) links, in arrival order. */
+  queued(): readonly PeerLink[];
   /**
    * Omegle "next": close the current match and advance to the next waiting link
    * (auto-pair), or go idle if the queue is empty. Returns the new current link.
@@ -127,12 +135,33 @@ export function createPairing(): LivePairing {
     emitMatch(link);
   };
 
+  const pushMessage = (link: PeerLink, m: { id: string; text: string; at: number }): void => {
+    const isQueued = current !== link;
+    const msg: PairingMessage = {
+      from: link.hello.handle,
+      id: m.id,
+      text: m.text,
+      at: m.at,
+      queued: isQueued,
+    };
+    buffer.push(msg);
+    if (isQueued) {
+      for (const cb of queuedCbs) cb(msg);
+    } else {
+      for (const cb of messageCbs) cb(msg);
+    }
+  };
+
   /**
    * Watch a link for a REMOTE hang-up. PeerLink only fires onClose on a remote
    * bye/end/error — a LOCAL close() (our own `next()`) never triggers this, so
    * there is no double-advance hazard.
+   *
+   * Also attach `onMessage` so every inbound chat line is buffered for the
+   * agent-native poll path (and any onMessage/onQueued listeners).
    */
   const watch = (link: PeerLink): void => {
+    link.onMessage((m) => pushMessage(link, m));
     link.onClose(() => {
       buffers.delete(link);
       if (current === link) {
@@ -186,6 +215,9 @@ export function createPairing(): LivePairing {
     },
     current(): PeerLink | undefined {
       return current;
+    },
+    queued(): readonly PeerLink[] {
+      return queue.slice();
     },
     add(link: PeerLink): void {
       // Dedupe by identity: if a link from this identity (pubkey, or handle if legacy) already exists, close it.
