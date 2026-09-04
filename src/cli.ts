@@ -6,7 +6,7 @@
  *   vibedating matches          list candidates in your league (live peers if any)
  *   vibedating discover         join the DHT on your league topic, find live peers
  *   vibedating open             serve the local web app at http://localhost:PORT
- *   vibedating mcp              run the stdio MCP server
+ *   vibedating mcp              run the stdio MCP server (full agent-native tools)
  *   vibedating --version
  *   vibedating --help
  *
