@@ -1,5 +1,11 @@
 # vibedating
 
+[![npm version](https://img.shields.io/npm/v/vibedate)](https://www.npmjs.com/package/vibedate)
+[![npm downloads per month](https://img.shields.io/npm/dm/vibedate)](https://www.npmjs.com/package/vibedate)
+[![license](https://img.shields.io/npm/l/vibedate)](https://www.npmjs.com/package/vibedate)
+
+[npm package](https://www.npmjs.com/package/vibedate) · [Install](#install) · [Quick start](#quick-start) · [Privacy](#privacy) · [Alternatives](#alternatives)
+
 Dating by tokens — connect your Claude Code / Codex usage, get sorted into a
 **league** (1M / 5M / 10M / 100M / 1B+), and match with people who burn tokens
 the way you do. The premise: heavy users of these tools share something worth
@@ -152,6 +158,11 @@ Bucketed by lifetime tokens; you match within your league **or an adjacent tier*
 An interactive, self-contained UX prototype (no build, no network):
 [`docs/prototype.html`](docs/prototype.html). The shipped local web app
 (`vibedating open`) is an adapted, data-driven version of this prototype.
+
+## Alternatives
+
+- Mainstream dating apps (Hinge, Bumble, Tinder) match on photos and prompts; vibedating matches on a signal that is hard to fake: how much compute you actually burn.
+- Speed-networking and community tools (Discord servers, hackathons) find other builders; this finds builders whose usage league sits near yours.
 
 ## License
 
