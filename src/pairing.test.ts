@@ -10,7 +10,7 @@ import type { PeerLink } from './link.js';
  */
 interface FakeLink extends PeerLink {
   fireRemoteClose(): void;
-  fireMessage(text: string): void;
+  fireMessage(text: string, id?: string): void;
 }
 
 function fakeLink(handle: string): FakeLink {
@@ -33,7 +33,7 @@ function fakeLink(handle: string): FakeLink {
     },
     close: vi.fn(() => { isClosed = true; }),
     fireRemoteClose: () => { isClosed = true; closeCb?.(); },
-    fireMessage: (text: string) => msgCb?.({ id: text, text, at: 1 }),
+    fireMessage: (text: string, id?: string) => msgCb?.({ id: id ?? text, text, at: 1 }),
   };
 }
 
@@ -271,9 +271,9 @@ describe('LivePairing — message routing (bind once, buffer non-current)', () =
   it('buffers a non-current peer message instead of dropping it, flushes on select', () => {
     const pairing = createPairing();
     const delivered: Array<[string, string]> = [];
-    const queued: Array<[string, number]> = [];
-    pairing.onMessage((from, m) => delivered.push([from, m.text]));
-    pairing.onQueued((from, n) => queued.push([from, n]));
+    const queued: Array<[string, string]> = [];
+    pairing.onMessage((m) => delivered.push([m.from, m.text]));
+    pairing.onQueued((m) => queued.push([m.from, m.text]));
 
     const alice = fakeLink('@alice');
     const bob = fakeLink('@bob');
@@ -284,7 +284,7 @@ describe('LivePairing — message routing (bind once, buffer non-current)', () =
     bob.fireMessage('hi from bob'); // non-current → BUFFERED, not dropped
 
     expect(delivered).toEqual([['@alice', 'hi from alice']]);
-    expect(queued).toEqual([['@bob', 1]]);
+    expect(queued).toEqual([['@bob', 'hi from bob']]);
 
     pairing.open('@bob'); // select bob → flush his buffer
     expect(delivered).toEqual([
@@ -296,7 +296,7 @@ describe('LivePairing — message routing (bind once, buffer non-current)', () =
   it('delivers a current-peer message exactly once (onMessage bound once per link)', () => {
     const pairing = createPairing();
     const delivered: string[] = [];
-    pairing.onMessage((_from, m) => delivered.push(m.text));
+    pairing.onMessage((m) => delivered.push(m.text));
     const alice = fakeLink('@alice');
     pairing.add(alice);
     alice.fireMessage('one');
