@@ -78,12 +78,12 @@ export interface LivePairing {
    * handle. Registered on the pairing (not per-link), so callers NEVER bind
    * `link.onMessage` themselves.
    */
-  onMessage(cb: (from: string, m: IncomingMessage) => void): void;
+  onMessage(cb: (m: PairingMessage) => void): void;
   /**
    * Register a callback fired when a NON-current (queued) peer sends a message —
    * it is buffered, not dropped. `queued` is that peer's current buffered count.
    */
-  onQueued(cb: (from: string, queued: number) => void): void;
+  onQueued(cb: (m: PairingMessage) => void): void;
   /**
    * Pull every inbound message received since the last drain (current + queued),
    * tagged with sender; empties the buffer. For PULL consumers (MCP live_poll).
@@ -103,27 +103,27 @@ const MAX_QUEUE = 100;
 export function createPairing(): LivePairing {
   const queue: PeerLink[] = [];
   const matchCbs = new Set<(link: PeerLink | undefined) => void>();
-  const msgCbs = new Set<(from: string, m: IncomingMessage) => void>();
-  const queuedCbs = new Set<(from: string, queued: number) => void>();
-  const buffers = new Map<PeerLink, IncomingMessage[]>();
+  const msgCbs = new Set<(m: PairingMessage) => void>();
+  const queuedCbs = new Set<(m: PairingMessage) => void>();
+  const buffers = new Map<PeerLink, PairingMessage[]>();
   const drainBuffer: PairingMessage[] = [];
   let current: PeerLink | undefined;
 
   const emitMatch = (link: PeerLink | undefined): void => {
     for (const cb of matchCbs) cb(link);
   };
-  const deliver = (from: string, m: IncomingMessage): void => {
-    for (const cb of msgCbs) cb(from, m);
+  const deliver = (m: PairingMessage): void => {
+    for (const cb of msgCbs) cb(m);
   };
-  const notifyQueued = (from: string, n: number): void => {
-    for (const cb of queuedCbs) cb(from, n);
+  const notifyQueued = (m: PairingMessage): void => {
+    for (const cb of queuedCbs) cb(m);
   };
 
   /** Flush any messages buffered while this link was NOT current. */
   const flush = (link: PeerLink): void => {
     const buf = buffers.get(link);
     if (buf !== undefined && buf.length > 0) {
-      for (const m of buf) deliver(link.hello.handle, m);
+      for (const m of buf) deliver(m);
       buffers.set(link, []);
     }
   };
@@ -135,23 +135,6 @@ export function createPairing(): LivePairing {
     emitMatch(link);
   };
 
-  const pushMessage = (link: PeerLink, m: { id: string; text: string; at: number }): void => {
-    const isQueued = current !== link;
-    const msg: PairingMessage = {
-      from: link.hello.handle,
-      id: m.id,
-      text: m.text,
-      at: m.at,
-      queued: isQueued,
-    };
-    buffer.push(msg);
-    if (isQueued) {
-      for (const cb of queuedCbs) cb(msg);
-    } else {
-      for (const cb of messageCbs) cb(msg);
-    }
-  };
-
   /**
    * Watch a link for a REMOTE hang-up. PeerLink only fires onClose on a remote
    * bye/end/error — a LOCAL close() (our own `next()`) never triggers this, so
@@ -161,7 +144,6 @@ export function createPairing(): LivePairing {
    * agent-native poll path (and any onMessage/onQueued listeners).
    */
   const watch = (link: PeerLink): void => {
-    link.onMessage((m) => pushMessage(link, m));
     link.onClose(() => {
       buffers.delete(link);
       if (current === link) {
@@ -190,21 +172,22 @@ export function createPairing(): LivePairing {
     link.onMessage((m) => {
       // Accumulate for pull-based consumers (MCP live_poll) — every inbound
       // message, current or queued, tagged with its sender.
-      drainBuffer.push({
+      const msg: PairingMessage = {
         from: link.hello.handle,
         id: m.id,
         text: m.text,
         at: m.at,
         queued: link !== current,
-      });
+      };
+      drainBuffer.push(msg);
       if (link === current) {
-        deliver(link.hello.handle, m);
+        deliver(msg);
       } else {
         const buf = buffers.get(link) ?? [];
-        buf.push(m);
+        buf.push(msg);
         if (buf.length > MAX_BUFFERED) buf.shift();
         buffers.set(link, buf);
-        notifyQueued(link.hello.handle, buf.length);
+        notifyQueued(msg);
       }
     });
   };
@@ -216,8 +199,8 @@ export function createPairing(): LivePairing {
     current(): PeerLink | undefined {
       return current;
     },
-    queued(): readonly PeerLink[] {
-      return queue.slice();
+    queued(): PeerLink[] {
+      return [...queue];
     },
     add(link: PeerLink): void {
       // Dedupe by identity: if a link from this identity (pubkey, or handle if legacy) already exists, close it.
@@ -280,17 +263,14 @@ export function createPairing(): LivePairing {
     onMatch(cb: (link: PeerLink | undefined) => void): void {
       matchCbs.add(cb);
     },
-    onMessage(cb: (from: string, m: IncomingMessage) => void): void {
+    onMessage(cb: (m: PairingMessage) => void): void {
       msgCbs.add(cb);
     },
-    onQueued(cb: (from: string, queued: number) => void): void {
+    onQueued(cb: (m: PairingMessage) => void): void {
       queuedCbs.add(cb);
     },
     drain(): PairingMessage[] {
       return drainBuffer.splice(0);
-    },
-    queued(): PeerLink[] {
-      return [...queue];
     },
   };
 }

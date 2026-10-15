@@ -766,13 +766,13 @@ async function cmdLiveViaRelay(profile: ProfileState, to: string | undefined): P
       `  · relayed to ${sanitizePeerText(l.hello.handle)} (${l.hello.league}${qual} · ${l.hello.harness}) ${usageMark(l.hello)}${idMark(l.hello)}\n`,
     );
   });
-  pairing.onMessage((from, m) => {
+  pairing.onMessage((m) => {
     // input-safety: chat text is UNTRUSTED display data — sanitized before print.
-    process.stdout.write(`  <${sanitizePeerText(from)}> ${sanitizePeerText(m.text)}\n`);
+    process.stdout.write(`  <${sanitizePeerText(m.from)}> ${sanitizePeerText(m.text)}\n`);
   });
-  pairing.onQueued((from, n) => {
+  pairing.onQueued((m) => {
     process.stdout.write(
-      `  · ${sanitizePeerText(from)} sent a message (${n} queued) — /open ${sanitizePeerText(from)} to read\n`,
+      `  · ${sanitizePeerText(m.from)} sent a message — /open ${sanitizePeerText(m.from)} to read\n`,
     );
   });
   pairing.add(link);
@@ -876,14 +876,14 @@ async function cmdLive(opts: { dating: boolean; any: boolean; to: string | undef
       `  · matched ${sanitizePeerText(link.hello.handle)} (${link.hello.league}${qual} · ${link.hello.harness}) ${usageMark(link.hello)}${idMark(link.hello)}\n`,
     );
   });
-  pairing.onMessage((from, m) => {
+  pairing.onMessage((m) => {
     // input-safety: chat text is UNTRUSTED display data — never executed, never
     // passed to a shell/agent; control/bidi chars stripped before printing.
-    process.stdout.write(`  <${sanitizePeerText(from)}> ${sanitizePeerText(m.text)}\n`);
+    process.stdout.write(`  <${sanitizePeerText(m.from)}> ${sanitizePeerText(m.text)}\n`);
   });
-  pairing.onQueued((from, n) => {
+  pairing.onQueued((m) => {
     process.stdout.write(
-      `  · ${sanitizePeerText(from)} sent a message (${n} queued) — /open ${sanitizePeerText(from)} to read\n`,
+      `  · ${sanitizePeerText(m.from)} sent a message — /open ${sanitizePeerText(m.from)} to read\n`,
     );
   });
 
